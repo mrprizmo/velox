@@ -101,6 +101,21 @@ class VectorSaverTest : public testing::Test, public VectorTestBase {
         }
         break;
       }
+      case VectorEncoding::Simple::UNION: {
+        auto expectedUnion = expected->as<UnionVector>();
+        auto actualUnion = actual->as<UnionVector>();
+
+        for (auto i = 0; i < expectedUnion->childrenSize(); ++i) {
+          ASSERT_TRUE(
+              (expectedUnion->childAt(i) != nullptr) ==
+              (actualUnion->childAt(i) != nullptr));
+          if (expectedUnion->childAt(i)) {
+            assertEqualEncodings(
+                expectedUnion->childAt(i), actualUnion->childAt(i));
+          }
+        }
+        break;
+      }
       default:
           // Do nothing.
           ;
@@ -249,6 +264,9 @@ TEST_F(VectorSaverTest, types) {
 
   testTypeRoundTrip(ARRAY(BIGINT()));
   testTypeRoundTrip(ARRAY(ARRAY(VARCHAR())));
+
+  testTypeRoundTrip(UNION({INTEGER(), VARCHAR()}));
+  testTypeRoundTrip(UNION({ARRAY(INTEGER()), ARRAY(VARCHAR())}));
 
   testTypeRoundTrip(MAP(INTEGER(), REAL()));
   testTypeRoundTrip(MAP(VARCHAR(), ARRAY(BIGINT())));
@@ -407,6 +425,53 @@ TEST_F(VectorSaverTest, row) {
   opts.nullRatio = 0.1;
   testRoundTrip(opts, flatRowType);
   testRoundTrip(opts, nestedRowType);
+}
+
+TEST_F(VectorSaverTest, flatUnion) {
+  auto unionType = UNION({INTEGER(), VARCHAR()});
+  auto unionVector = makeUnionVector(
+      unionType,
+      100,
+      [](auto i) {
+        return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+      },
+      nullEvery(5));
+
+  testRoundTrip(unionVector);
+}
+
+TEST_F(VectorSaverTest, constantUnion) {
+  auto type = UNION({INTEGER(), DOUBLE()});
+  auto value = Variant::unionVariant(Variant(3.14));
+  auto constantUnion = BaseVector::createConstant(type, value, 50, pool());
+
+  testRoundTrip(constantUnion);
+}
+
+TEST_F(VectorSaverTest, dictionaryUnion) {
+  auto type = UNION({INTEGER(), VARCHAR()});
+  auto base = makeUnionVector(type, 10, [](auto i) {
+    return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+  });
+
+  auto indices = makeIndices(5, [](auto i) { return i * 2; });
+  auto dict = wrapInDictionary(indices, 5, base);
+
+  testRoundTrip(dict);
+}
+
+TEST_F(VectorSaverTest, nestedUnionInRow) {
+  auto unionType = UNION({INTEGER(), DOUBLE()});
+  auto rowType = ROW({"u_col", "int_col"}, {unionType, INTEGER()});
+
+  auto unionCol = makeUnionVector(unionType, 10, [](auto i) {
+    return i % 2 == 0 ? Variant(i) : Variant(static_cast<double>(i));
+  });
+  auto intCol = makeFlatVector<int32_t>(10, [](auto i) { return i; });
+
+  auto rowVector = makeRowVector({unionCol, intCol});
+
+  testRoundTrip(rowVector);
 }
 
 TEST_F(VectorSaverTest, array) {

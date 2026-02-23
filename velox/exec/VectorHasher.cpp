@@ -59,7 +59,7 @@ template <bool typeProvidesCustomComparison, TypeKind Kind>
 uint64_t hashOne(DecodedVector& decoded, vector_size_t index) {
   if constexpr (
       Kind == TypeKind::ROW || Kind == TypeKind::ARRAY ||
-      Kind == TypeKind::MAP) {
+      Kind == TypeKind::MAP || Kind == TypeKind::UNION) {
     // Virtual function call for complex type.
     return decoded.base()->hashValueAt(decoded.index(index));
   } else {

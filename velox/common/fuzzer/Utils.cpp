@@ -36,13 +36,16 @@ TypePtr randType(
   if (maxDepth <= 1 || rand<bool>(rng)) {
     return scalarTypes[rand<uint32_t>(rng) % numScalarTypes];
   }
-  switch (rand<uint32_t>(rng) % 3) {
+  switch (rand<uint32_t>(rng) % 4) {
     case 0:
       return randMapType(
           rng, scalarTypes, maxDepth, mapKeyTypes, mapValueTypes);
     case 1:
       return ARRAY(
           randType(rng, scalarTypes, maxDepth - 1, mapKeyTypes, mapValueTypes));
+    case 2:
+      return randUnionType(
+          rng, scalarTypes, maxDepth - 1, mapKeyTypes, mapValueTypes);
     default:
       return randRowType(
           rng, scalarTypes, maxDepth - 1, mapKeyTypes, mapValueTypes);
@@ -79,6 +82,29 @@ RowTypePtr randRowType(
         randType(rng, scalarTypes, maxDepth, mapKeyTypes, mapValueTypes));
   }
   return ROW(std::move(names), std::move(fields));
+}
+
+UnionTypePtr randUnionType(
+    FuzzerGenerator& rng,
+    const std::vector<TypePtr>& scalarTypes,
+    int maxDepth,
+    const std::vector<TypePtr>& mapKeyTypes,
+    const std::vector<TypePtr>& mapValueTypes) {
+  const int numScalarTypes = scalarTypes.size();
+  const int numFields = 1 + rand<uint32_t>(rng) % 7;
+  std::vector<TypePtr> fields;
+  fields.reserve(numFields);
+
+  fields.push_back(scalarTypes[rand<uint32_t>(rng) % numScalarTypes]);
+  for (int i = 1; i < numFields; ++i) {
+    auto type =
+        randType(rng, scalarTypes, maxDepth, mapKeyTypes, mapValueTypes);
+    if (!type->isUnion()) {
+      fields.push_back(std::move(type));
+    }
+  }
+
+  return UNION(std::move(fields));
 }
 
 Timestamp randTimestamp(

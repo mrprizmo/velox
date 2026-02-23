@@ -368,6 +368,13 @@ void PrestoHasher::hash<TypeKind::ROW>(
   });
 }
 
+template <>
+void PrestoHasher::hash<TypeKind::UNION>(
+    const SelectivityVector& rows,
+    BufferPtr& hashes) {
+  VELOX_NYI();
+}
+
 void PrestoHasher::hash(
     const VectorPtr& vector,
     const SelectivityVector& rows,

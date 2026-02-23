@@ -59,6 +59,79 @@ RowVectorPtr VectorMaker::rowVector(
       pool_, rowType, BufferPtr(nullptr), size, std::vector<VectorPtr>{});
 }
 
+UnionVectorPtr VectorMaker::unionVector(
+    const TypePtr& type,
+    vector_size_t size,
+    std::function<Variant(vector_size_t /*row*/)> valueAt,
+    std::function<bool(vector_size_t /*row*/)> isNullAt) {
+  VELOX_CHECK(type->isUnion(), "Expected UNION type, but got: {}", type->toString());
+
+  auto numChildren = type->size();
+  auto& unionType = type->asUnion();
+
+  BufferPtr tags = allocateTags(size, pool_);
+  auto rawTags = tags->asMutable<uint8_t>();
+
+  BufferPtr nulls = isNullAt ? allocateNulls(size, pool_) : nullptr;
+  uint64_t* rawNulls = nulls ? nulls->asMutable<uint64_t>() : nullptr;
+
+  std::vector<std::vector<Variant>> childrenVariants(numChildren);
+  vector_size_t nullCount = 0;
+
+  for (vector_size_t i = 0; i < size; ++i) {
+
+    if (isNullAt && isNullAt(i)) {
+      bits::setNull(rawNulls, i, true);
+      rawTags[i] = 0;
+      nullCount++;
+      continue;
+    }
+
+    if (rawNulls) {
+      bits::setNull(rawNulls, i, false);
+    }
+
+    Variant val = valueAt(i);
+    
+    auto valType = val.inferType();
+    uint8_t tag = unionType.typeIndex(valType);
+
+    rawTags[i] = tag;
+    childrenVariants[tag].push_back(std::move(val));
+  }
+
+  std::vector<VectorPtr> children;
+  children.reserve(numChildren);
+
+  for (uint32_t j = 0; j < numChildren; ++j) {
+    auto childType = type->childAt(j);
+    auto childSize = static_cast<vector_size_t>(childrenVariants[j].size());
+    auto childVector = BaseVector::create(childType, childSize, pool_);
+
+    // perhaps it's worth finding a more efficient way
+    for (vector_size_t k = 0; k < childSize; ++k) {
+      const auto& v = childrenVariants[j][k];
+      if (v.isNull()) {
+        childVector->setNull(k, true);
+      } else {
+        auto tempConst = BaseVector::createConstant(childType, v, 1, pool_);
+        childVector->copy(tempConst.get(), k, 0, 1);
+      }
+    }
+
+    children.push_back(std::move(childVector));
+  }
+
+  return std::make_shared<UnionVector>(
+      pool_,
+      type,
+      std::move(nulls),
+      size,
+      std::move(children),
+      std::move(tags),
+      nullCount > 0 ? std::optional(nullCount) : std::nullopt);
+}
+
 vector_size_t VectorMaker::createOffsetsAndSizes(
     vector_size_t size,
     std::function<vector_size_t(vector_size_t /* row */)> sizeAt,

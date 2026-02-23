@@ -329,6 +329,221 @@ TEST(VariantCreateTest, rowType) {
   EXPECT_EQ(moveVariant.value<TypeKind::ROW>().size(), 2);
 }
 
+TEST(VariantTest, unionType) {
+  auto intUnion = Variant::unionVariant(Variant(42));
+  EXPECT_FALSE(intUnion.isNull());
+  EXPECT_EQ(intUnion.kind(), TypeKind::UNION);
+  EXPECT_EQ(intUnion.value<TypeKind::UNION>().value<TypeKind::INTEGER>(), 42);
+
+  auto stringUnion = Variant::unionVariant(Variant("test"));
+  EXPECT_EQ(
+      stringUnion.value<TypeKind::UNION>().value<TypeKind::VARCHAR>(), "test");
+
+  auto nullUnion = Variant::unionVariant(Variant::null(TypeKind::INTEGER));
+  EXPECT_TRUE(nullUnion.value<TypeKind::UNION>().isNull());
+  EXPECT_EQ(nullUnion.value<TypeKind::UNION>().kind(), TypeKind::INTEGER);
+
+  auto nullUnionVariant = Variant::null(TypeKind::UNION);
+  EXPECT_TRUE(nullUnionVariant.isNull());
+  EXPECT_EQ(nullUnionVariant.kind(), TypeKind::UNION);
+}
+
+TEST(VariantTest, unionEquals) {
+  auto u1 = Variant::unionVariant(Variant(42));
+  auto u2 = Variant::unionVariant(Variant(42));
+  auto u3 = Variant::unionVariant(Variant(43));
+  auto u4 = Variant::unionVariant(Variant("test"));
+
+  EXPECT_TRUE(u1.equals(u2));
+  EXPECT_FALSE(u1.equals(u3));
+  EXPECT_FALSE(u1.equals(u4));
+
+  auto row1 = Variant::row({Variant(1), Variant("test")});
+  auto row2 = Variant::row({Variant(1), Variant("test")});
+  auto row3 = Variant::row({Variant(2), Variant("test")});
+
+  auto ur1 = Variant::unionVariant(row1);
+  auto ur2 = Variant::unionVariant(row2);
+  auto ur3 = Variant::unionVariant(row3);
+
+  EXPECT_TRUE(ur1.equals(ur2));
+  EXPECT_FALSE(ur1.equals(ur3));
+
+  // Null unions
+  auto null1 = Variant::null(TypeKind::UNION);
+  auto null2 = Variant::null(TypeKind::UNION);
+  auto intNull = Variant::unionVariant(Variant::null(TypeKind::INTEGER));
+
+  EXPECT_TRUE(null1.equals(null2)); // null == null by default
+  EXPECT_FALSE(u1.equals(null1));
+  EXPECT_FALSE(null1.equals(u1));
+  EXPECT_TRUE(intNull.value<TypeKind::UNION>().isNull());
+}
+
+TEST(VariantTest, unionHash) {
+  auto u1 = Variant::unionVariant(Variant(42));
+  auto u2 = Variant::unionVariant(Variant(42));
+  auto u3 = Variant::unionVariant(Variant(43));
+
+  EXPECT_EQ(u1.hash(), u2.hash());
+  EXPECT_NE(u1.hash(), u3.hash());
+
+  auto row1 = Variant::row({Variant(1), Variant("test")});
+  auto row2 = Variant::row({Variant(1), Variant("test")});
+  auto row3 = Variant::row({Variant(2), Variant("test")});
+
+  auto ur1 = Variant::unionVariant(row1);
+  auto ur2 = Variant::unionVariant(row2);
+  auto ur3 = Variant::unionVariant(row3);
+
+  EXPECT_EQ(ur1.hash(), ur2.hash());
+  EXPECT_NE(ur1.hash(), ur3.hash());
+}
+
+TEST(VariantTest, unionInferType) {
+  auto intUnion = Variant::unionVariant(Variant(42));
+  auto intUnionType = intUnion.inferType();
+  EXPECT_EQ(intUnionType->kind(), TypeKind::UNION);
+  EXPECT_EQ(intUnionType->size(), 1);
+  EXPECT_EQ(intUnionType->childAt(0)->kind(), TypeKind::INTEGER);
+
+  auto stringUnion = Variant::unionVariant(Variant("test"));
+  auto stringUnionType = stringUnion.inferType();
+  EXPECT_EQ(stringUnionType->kind(), TypeKind::UNION);
+  EXPECT_EQ(stringUnionType->size(), 1);
+  EXPECT_EQ(stringUnionType->childAt(0)->kind(), TypeKind::VARCHAR);
+
+  auto rowUnion =
+      Variant::unionVariant(Variant::row({Variant(1), Variant("test")}));
+  auto rowUnionType = rowUnion.inferType();
+  EXPECT_EQ(rowUnionType->kind(), TypeKind::UNION);
+  EXPECT_EQ(rowUnionType->size(), 1);
+  EXPECT_EQ(rowUnionType->childAt(0)->kind(), TypeKind::ROW);
+
+  const auto& rowType = rowUnionType->childAt(0)->asRow();
+  EXPECT_EQ(rowType.size(), 2);
+  EXPECT_EQ(rowType.childAt(0)->kind(), TypeKind::INTEGER);
+  EXPECT_EQ(rowType.childAt(1)->kind(), TypeKind::VARCHAR);
+
+  auto nullUnion = Variant::null(TypeKind::UNION);
+  auto nullUnionType = nullUnion.inferType();
+  EXPECT_EQ(nullUnionType->kind(), TypeKind::UNION);
+  EXPECT_EQ(nullUnionType->size(), 1);
+}
+
+TEST(VariantTest, unionTypeCompatibility) {
+  auto intUnion = Variant::unionVariant(Variant(42));
+  auto stringUnion = Variant::unionVariant(Variant("test"));
+  auto rowUnion =
+      Variant::unionVariant(Variant::row({Variant(1), Variant("test")}));
+
+  // Union types for testing
+  auto unionWithInt = UNION({INTEGER()});
+  auto unionWithString = UNION({VARCHAR()});
+  auto unionWithRow = UNION({ROW({INTEGER(), VARCHAR()})});
+  auto unionWithBoth =
+      UNION({INTEGER(), VARCHAR(), ROW({INTEGER(), VARCHAR()})});
+  auto unionWithUnknown = UNION({UNKNOWN()});
+
+  // Compatibility checks
+  EXPECT_TRUE(intUnion.isTypeCompatible(unionWithInt));
+  EXPECT_FALSE(intUnion.isTypeCompatible(unionWithString));
+  EXPECT_TRUE(intUnion.isTypeCompatible(unionWithBoth));
+
+  EXPECT_FALSE(stringUnion.isTypeCompatible(unionWithInt));
+  EXPECT_TRUE(stringUnion.isTypeCompatible(unionWithString));
+  EXPECT_TRUE(stringUnion.isTypeCompatible(unionWithBoth));
+
+  EXPECT_FALSE(rowUnion.isTypeCompatible(unionWithInt));
+  EXPECT_FALSE(rowUnion.isTypeCompatible(unionWithString));
+  EXPECT_TRUE(rowUnion.isTypeCompatible(unionWithRow));
+  EXPECT_TRUE(rowUnion.isTypeCompatible(unionWithBoth));
+
+  // Union with null value
+  auto nullIntUnion = Variant::unionVariant(Variant::null(TypeKind::INTEGER));
+  EXPECT_TRUE(nullIntUnion.isTypeCompatible(unionWithInt));
+  EXPECT_FALSE(nullIntUnion.isTypeCompatible(unionWithString));
+  EXPECT_TRUE(nullIntUnion.isTypeCompatible(unionWithBoth));
+
+  // Not compatible with non-union types
+  EXPECT_FALSE(intUnion.isTypeCompatible(INTEGER()));
+  EXPECT_FALSE(stringUnion.isTypeCompatible(VARCHAR()));
+  EXPECT_FALSE(rowUnion.isTypeCompatible(ROW({INTEGER(), VARCHAR()})));
+}
+
+TEST(VariantTest, unionSerialization) {
+  auto intUnion = Variant::unionVariant(Variant(42));
+  auto serialized = intUnion.serialize();
+  auto deserialized = Variant::create(serialized);
+
+  EXPECT_TRUE(intUnion.equals(deserialized));
+  EXPECT_EQ(deserialized.kind(), TypeKind::UNION);
+  EXPECT_EQ(
+      deserialized.value<TypeKind::UNION>().value<TypeKind::INTEGER>(), 42);
+
+  auto rowUnion =
+      Variant::unionVariant(Variant::row({Variant(1), Variant("test")}));
+  auto rowSerialized = rowUnion.serialize();
+  auto rowDeserialized = Variant::create(rowSerialized);
+
+  EXPECT_TRUE(rowUnion.equals(rowDeserialized));
+  EXPECT_EQ(rowDeserialized.kind(), TypeKind::UNION);
+
+  const auto& deserializedRow =
+      rowDeserialized.value<TypeKind::UNION>().value<TypeKind::ROW>();
+  EXPECT_EQ(deserializedRow.size(), 2);
+  EXPECT_EQ(deserializedRow[0].value<TypeKind::INTEGER>(), 1);
+  EXPECT_EQ(deserializedRow[1].value<TypeKind::VARCHAR>(), "test");
+
+  auto nullUnion = Variant::null(TypeKind::UNION);
+  auto nullSerialized = nullUnion.serialize();
+  auto nullDeserialized = Variant::create(nullSerialized);
+
+  EXPECT_TRUE(nullUnion.equals(nullDeserialized));
+  EXPECT_EQ(nullDeserialized.kind(), TypeKind::UNION);
+  EXPECT_TRUE(nullDeserialized.isNull());
+}
+
+TEST(VariantTest, unionToString) {
+  auto unionType = UNION({INTEGER(), VARCHAR(), ROW({INTEGER(), VARCHAR()})});
+
+  auto intUnion = Variant::unionVariant(Variant(42));
+  EXPECT_EQ(intUnion.toString(unionType), R"({"tag":"0","value":42})");
+
+  auto stringUnion = Variant::unionVariant(Variant("hello"));
+  EXPECT_EQ(stringUnion.toString(unionType), R"({"tag":"2","value":"hello"})");
+
+  auto rowUnion =
+      Variant::unionVariant(Variant::row({Variant(1), Variant("test")}));
+  EXPECT_EQ(rowUnion.toString(unionType), R"({"tag":"1","value":[1,"test"]})");
+
+  auto nullUnion = Variant::null(TypeKind::UNION);
+  EXPECT_EQ(nullUnion.toString(unionType), "null");
+}
+
+TEST(VariantTest, unionToJson) {
+  auto intUnion = Variant::unionVariant(Variant(42));
+  auto intUnionType = intUnion.inferType();
+
+  EXPECT_EQ(intUnion.toJson(intUnionType), R"({"tag":"0","value":42})");
+
+  auto multiType = UNION({VARCHAR(), INTEGER()});
+  auto stringUnion = Variant::unionVariant(Variant("hello"));
+
+  EXPECT_EQ(stringUnion.toJson(multiType), R"({"tag":"1","value":"hello"})");
+
+  auto rowUnion =
+      Variant::unionVariant(Variant::row({Variant(1), Variant("test")}));
+  auto rowUnionType = rowUnion.inferType();
+
+  EXPECT_EQ(rowUnion.toJson(rowUnionType), R"({"tag":"0","value":[1,"test"]})");
+
+  auto nullUnion = Variant::null(TypeKind::UNION);
+  auto nullUnionType = nullUnion.inferType();
+
+  EXPECT_EQ(nullUnion.toJson(nullUnionType), "null");
+}
+
 // Test the template <typename T> create() version. This version uses
 // CppToType<T>::typeKind to deduce the TypeKind.
 TEST(VariantCreateTest, templateTypeVersion) {

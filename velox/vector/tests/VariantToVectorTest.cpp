@@ -202,6 +202,17 @@ TEST_F(VariantToVectorTest, rowOfComplexTypes) {
   testValue(type, row, expected);
 }
 
+TEST_F(VariantToVectorTest, union) {
+  auto type = UNION({INTEGER(), VARCHAR()});
+
+  testNull(type);
+
+  auto expected = makeUnionVector(type, {Variant(55)});
+
+  auto unionVariant = Variant::unionVariant(Variant(55));
+  testValue(type, unionVariant, expected);
+}
+
 struct OpaqueValue {
   int value;
   explicit OpaqueValue(int v) : value{v} {}

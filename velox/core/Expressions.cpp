@@ -298,6 +298,14 @@ bool equalsNoNulls<TypeKind::ROW>(
   return true;
 }
 
+template <>
+bool equalsNoNulls<TypeKind::UNION>(
+    const VectorPtr& vector,
+    vector_size_t index,
+    const Variant& value) {
+  VELOX_NYI();
+}
+
 bool equalsImpl(
     const VectorPtr& vector,
     vector_size_t index,
@@ -411,6 +419,15 @@ uint64_t hashImpl<TypeKind::ROW>(const TypePtr& type, const Variant& value) {
     }
   }
   return hash;
+}
+
+template <>
+uint64_t hashImpl<TypeKind::UNION>(const TypePtr& type, const Variant& value) {
+  auto& unionValue = value.value<TypeKind::UNION>();
+  auto inferType = unionValue.inferType();
+
+  auto childTag = type->asUnion().typeIndex(inferType);
+  return hashImpl(type->childAt(childTag), unionValue);
 }
 
 uint64_t hashImpl(const TypePtr& type, const Variant& value) {

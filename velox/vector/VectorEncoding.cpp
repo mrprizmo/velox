@@ -30,6 +30,7 @@ Simple mapNameToSimple(const std::string& name) {
       {"DICTIONARY", Simple::DICTIONARY},
       {"FLAT", Simple::FLAT},
       {"SEQUENCE", Simple::SEQUENCE},
+      {"UNION", Simple::UNION},
       {"ROW", Simple::ROW},
       {"MAP", Simple::MAP},
       {"FLAT_MAP", Simple::FLAT_MAP},

@@ -111,6 +111,21 @@ void writeOne<TypeKind::MAP>(const variant& v, exec::GenericWriter& writer) {
 }
 
 template <>
+void writeOne<TypeKind::UNION>(const variant& v, exec::GenericWriter& writer) {
+  auto& writerTyped = writer.template castTo<DynamicUnion>();
+  const auto& inner = v.value<TypeKind::UNION>();
+
+  uint8_t tag = writerTyped.find_tag(inner.inferType());
+
+  if (inner.isNull()) {
+    writerTyped.set_null();
+  } else {
+    VELOX_DYNAMIC_TYPE_DISPATCH(
+        writeOne, inner.kind(), inner, writerTyped.set_tag(tag));
+  }
+}
+
+template <>
 void writeOne<TypeKind::ROW>(const variant& v, exec::GenericWriter& writer) {
   auto& writerTyped = writer.template castTo<DynamicRow>();
   const auto& elements = v.row();

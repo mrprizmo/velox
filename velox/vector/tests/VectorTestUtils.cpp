@@ -95,6 +95,21 @@ void checkVectorFlagsClearedTyped<TypeKind::ARRAY>(
 }
 
 template <>
+void checkVectorFlagsClearedTyped<TypeKind::UNION>(
+    const BaseVector& vector,
+    const SelectivityVector& /*asciiClearedRows*/,
+    const SelectivityVector& /*asciiRemainRows*/) {
+  auto* unionVector = vector.as<UnionVector>();
+
+  checkBaseVectorFlagsCleared(vector);
+  for (const auto& child : unionVector->children()) {
+    if (child) {
+      checkVectorFlagsCleared(*child, {}, {});
+    }
+  }
+}
+
+template <>
 void checkVectorFlagsClearedTyped<TypeKind::ROW>(
     const BaseVector& vector,
     const SelectivityVector& asciiClearedRows,
@@ -161,6 +176,20 @@ void checkVectorFlagsSetTyped<TypeKind::ARRAY>(
   EXPECT_TRUE(vector.getNullCount().has_value());
 
   checkVectorFlagsSet(*vector.as<ArrayVector>()->elements(), asciiSetRows);
+}
+
+template <>
+void checkVectorFlagsSetTyped<TypeKind::UNION>(
+    const BaseVector& vector,
+    const SelectivityVector& asciiSetRows) {
+  EXPECT_TRUE(vector.getNullCount().has_value());
+
+  auto* unionVector = vector.as<UnionVector>();
+  for (const auto& child : unionVector->children()) {
+    if (child) {
+      checkVectorFlagsSet(*child, asciiSetRows);
+    }
+  }
 }
 
 template <>

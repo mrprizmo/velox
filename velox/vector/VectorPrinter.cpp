@@ -253,6 +253,51 @@ class RowVectorPrinter : public VectorPrinterBase {
   }
 };
 
+class UnionVectorPrinter : public VectorPrinterBase {
+ public:
+  explicit UnionVectorPrinter(const BaseVector& vector)
+      : VectorPrinterBase(vector) {
+    auto* unionVector = decoded_.base()->as<UnionVector>();
+    for (const auto& child : unionVector->children()) {
+      if (child) {
+        children_.emplace_back(createVectorPrinter(*child));
+      } else {
+        children_.emplace_back(nullptr);
+      }
+    }
+  }
+
+ protected:
+  std::string printNonNull(vector_size_t index, const std::string& indent)
+      const override {
+    std::stringstream out;
+
+    auto unionVector = decoded_.base()->as<UnionVector>();
+    auto baseIndex = decoded_.index(index);
+
+    auto tag = unionVector->tagAt(baseIndex);
+    auto offset = unionVector->offsetAt(baseIndex);
+
+    VELOX_CHECK(children_[tag] != nullptr, "Null child printer found for tag {}", tag);
+
+    out << indent << "Tag " << static_cast<int32_t>(tag) << " (Offset " << offset << "):" << std::endl;
+    out << children_[tag]->print(offset, addIndent(indent));
+
+    return out.str();
+  }
+
+  std::string summarizeNonNull(vector_size_t index) const override {
+    auto* base = decoded_.base()->as<UnionVector>();
+    auto baseIndex = decoded_.index(index);
+    auto tag = base->tagAt(baseIndex);
+    
+    return fmt::format(
+        "{} (active tag: {})",
+        base->type()->toString(),
+        tag);
+  }
+};
+
 std::unique_ptr<VectorPrinterBase> createVectorPrinter(
     const BaseVector& vector) {
   switch (vector.typeKind()) {
@@ -262,6 +307,8 @@ std::unique_ptr<VectorPrinterBase> createVectorPrinter(
       return std::make_unique<MapVectorPrinter>(vector);
     case TypeKind::ROW:
       return std::make_unique<RowVectorPrinter>(vector);
+    case TypeKind::UNION:
+      return std::make_unique<UnionVectorPrinter>(vector);
     default:
       return std::make_unique<PrimitiveVectorPrinter>(vector);
   }
@@ -343,6 +390,18 @@ std::string printTypeAndEncodingTree(
       for (auto i = 0; i < rowType.size(); ++i) {
         out << indent << "Field " << rowType.nameOf(i) << ":" << std::endl;
         out << printTypeAndEncodingTree(*rowVector->childAt(i), newIndent);
+      }
+      break;
+    }
+    case VectorEncoding::Simple::UNION: {
+      auto* unionVector = vector.as<UnionVector>();
+      printEncodingAndType(vector, indent, out);
+      for (uint32_t i = 0; i < unionVector->childrenSize(); ++i) {
+        const auto& childVector = unionVector->childAt(i);
+        if (childVector) {
+          out << indent << "Member " << i << ":" << std::endl;
+          out << printTypeAndEncodingTree(*childVector, newIndent);
+        }
       }
       break;
     }
@@ -597,6 +656,36 @@ class VectorVisitor {
       ctx.text << toIndentation(ctx.indent) << "..."
                << (vector.childrenSize() - cnt) << " more" << std::endl;
     }
+  }
+
+  void visitUnionVector(const UnionVector& vector, Context& ctx) {
+    size_t numNulls = 0;
+    std::vector<size_t> tagCounts(vector.childrenSize(), 0);
+
+    for (auto i = 0; i < vector.size(); ++i) {
+      if (vector.isNullAt(i)) {
+        ++numNulls;
+      } else {
+        tagCounts[vector.tagAt(i)]++;
+      }
+    }
+
+    const auto indent = toIndentation(ctx.indent + 1);
+    ctx.text << indent << "Stats: " << numNulls << " nulls";
+    for (size_t i = 0; i < tagCounts.size(); ++i) {
+      ctx.text << ", tag " << i << ": " << tagCounts[i];
+    }
+    ctx.text << std::endl;
+
+    for (uint32_t i = 0; i < vector.childrenSize(); ++i) {
+      const auto& childVector = vector.childAt(i);
+      if (childVector) {
+        ctx.name = fmt::format("tag {}", i);
+        visit(*childVector, ctx);
+        ctx.nodeId++;
+      }
+    }
+    ctx.name.reset();
   }
 
   void visitDictionaryVector(const BaseVector& vector, Context& ctx) {

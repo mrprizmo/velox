@@ -1002,6 +1002,53 @@ TEST_F(VectorMakerTest, constantRowVector) {
   ASSERT_EQ("orange", colorVector->valueAt(0).str());
 }
 
+TEST_F(VectorMakerTest, unionVector) {
+  auto type = UNION({INTEGER(), VARCHAR()});
+  std::vector<Variant> data = {
+      Variant(10),
+      Variant("hello"),
+      Variant::null(TypeKind::UNKNOWN),
+      Variant::null(TypeKind::INTEGER),
+      Variant("world"),
+  };
+
+  auto unionVector = maker_.unionVector(
+      type,
+      static_cast<vector_size_t>(data.size()),
+      [&data](vector_size_t i) { return data[i]; },
+      [](vector_size_t i) { return i == 2; });
+
+  EXPECT_EQ(data.size(), unionVector->size());
+  EXPECT_TRUE(unionVector->mayHaveNulls());
+  EXPECT_EQ(1, unionVector->getNullCount().value());
+
+  EXPECT_EQ(0, unionVector->tagAt(0));
+  EXPECT_EQ(
+      10,
+      unionVector->childAt(0)->asFlatVector<int32_t>()->valueAt(
+          unionVector->offsetAt(0)));
+  EXPECT_EQ(1, unionVector->tagAt(1));
+  EXPECT_EQ(0, unionVector->offsetAt(1));
+  EXPECT_EQ(
+      "hello",
+      unionVector->childAt(1)->asFlatVector<StringView>()->valueAt(0).str());
+
+  EXPECT_TRUE(unionVector->isNullAt(2));
+  EXPECT_EQ(0, unionVector->tagAt(2));
+
+  EXPECT_TRUE(unionVector->isNullAt(3));
+  EXPECT_EQ(0, unionVector->tagAt(3));
+  EXPECT_TRUE(unionVector->childAt(0)->isNullAt(unionVector->offsetAt(3)));
+
+  EXPECT_EQ(1, unionVector->tagAt(4));
+  EXPECT_EQ(1, unionVector->offsetAt(4));
+  EXPECT_EQ(
+      "world",
+      unionVector->childAt(1)->asFlatVector<StringView>()->valueAt(1).str());
+
+  EXPECT_TRUE(unionVector->containsNullAt(3));
+}
+
 TEST_F(VectorMakerTest, constantVectorErrors) {
   // Error variations.
   EXPECT_THROW(maker_.constantVector<int64_t>({}), VeloxRuntimeError);

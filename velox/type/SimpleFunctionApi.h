@@ -177,6 +177,11 @@ struct DynamicRow {
   DynamicRow() {}
 };
 
+struct DynamicUnion {
+ private:
+  DynamicUnion() {}
+};
+
 // T must be a struct with T::type being a built-in type and T::typeName
 // type name to use in FunctionSignature.
 // providesCustomComparison must be set to true to ensure values are wrapped in
@@ -329,6 +334,13 @@ struct CppToType<DynamicRow> : public TypeTraits<TypeKind::ROW> {
   }
 };
 
+template <>
+struct CppToType<DynamicUnion> : public TypeTraits<TypeKind::UNION> {
+  static std::shared_ptr<const Type> create() {
+    throw std::logic_error{"can't determine exact type for DynamicUnion"};
+  }
+};
+
 template <typename T, bool providesCustomComparison>
 struct CppToType<CustomType<T, providesCustomComparison>>
     : public CppToType<typename T::type> {
@@ -396,6 +408,9 @@ struct SimpleTypeTrait<Row<T...>> : public TypeTraits<TypeKind::ROW> {};
 
 template <>
 struct SimpleTypeTrait<DynamicRow> : public TypeTraits<TypeKind::ROW> {};
+
+template <>
+struct SimpleTypeTrait<DynamicUnion> : public TypeTraits<TypeKind::UNION> {};
 
 // T is also a simple type that represent the physical type of the custom type.
 template <typename T, bool providesCustomComparison>

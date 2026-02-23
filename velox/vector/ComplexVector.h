@@ -26,6 +26,195 @@
 
 namespace facebook::velox {
 
+class UnionVector : public BaseVector {
+ public:
+  UnionVector(
+      velox::memory::MemoryPool* pool,
+      TypePtr type,
+      BufferPtr nulls,
+      vector_size_t length,
+      std::vector<VectorPtr> children,
+      BufferPtr tags,
+      BufferPtr offsets,
+      std::optional<vector_size_t> nullCount = std::nullopt);
+
+  UnionVector(
+    velox::memory::MemoryPool* pool,
+    TypePtr type,
+    BufferPtr nulls,
+    vector_size_t length,
+    std::vector<VectorPtr> children,
+    BufferPtr tags,
+    std::optional<vector_size_t> nullCount = std::nullopt);
+
+  ~UnionVector() override = default;
+
+  /**
+   * returns the discriminator (type tag) for the row.
+   */
+  uint8_t tagAt(vector_size_t index) const {
+    return rawTags_[index];
+  }
+
+  /**
+   * returns the index of the row within the corresponding child vector.
+   */
+  vector_size_t offsetAt(vector_size_t index) const {
+    return rawOffsets_[index];
+  }
+
+  /**
+   * Returns the child vector for the given tag.
+   */
+  const VectorPtr& childAt(uint8_t tag) const {
+    VELOX_CHECK_LT(static_cast<size_t>(tag), children_.size(), 
+    "Trying to access non-existing child in UnionVector: {}",
+        toString());
+    return children_[tag];
+  }
+
+  VectorPtr& childAt(uint8_t tag) {
+    VELOX_CHECK_LT(static_cast<size_t>(tag), children_.size(), 
+    "Trying to access non-existing child in UnionVector: {}",
+        toString());
+    return children_[tag];
+  }
+
+  const BufferPtr& tags() const {
+    return tags_;
+  }
+
+  const BufferPtr& offsets() const {
+    return offsets_;
+  }
+
+  const uint8_t* rawTags() const {
+    return rawTags_;
+  }
+
+  const vector_size_t* rawOffsets() const {
+    return rawOffsets_;
+  }
+
+  std::vector<VectorPtr>& children() {
+    return children_;
+  }
+
+  const std::vector<VectorPtr>& children() const {
+    return children_;
+  }
+
+  size_t childrenSize() const {
+    return childrenSize_;
+  }
+
+  // BaseVector interface implementations.
+
+  bool isNullAt(vector_size_t index) const override;
+
+  bool containsNullAt(vector_size_t index) const override;
+
+  void ensureChild(uint8_t tag);
+
+  std::optional<int32_t> compare(
+      const BaseVector* other,
+      vector_size_t index,
+      vector_size_t otherIndex,
+      CompareFlags flags) const override;
+
+  uint64_t hashValueAt(vector_size_t index) const override;
+
+  std::unique_ptr<SimpleVector<uint64_t>> hashAll() const override;
+
+  void copy(
+      const BaseVector* source,
+      vector_size_t targetIndex,
+      vector_size_t sourceIndex,
+      vector_size_t count) override;
+
+  void copy(
+    const BaseVector* source,
+    const SelectivityVector& rows,
+    const vector_size_t* toSourceRow) override;
+
+  void copyRanges(
+      const BaseVector* source,
+      const folly::Range<const CopyRange*>& ranges) override;
+
+  void resize(vector_size_t size, bool setNotNull = true) override;
+
+  VectorPtr slice(vector_size_t offset, vector_size_t length) const override;
+
+  void ensureWritable(const SelectivityVector& rows) override;
+
+  bool isWritable() const override;
+
+  void prepareForReuse() override;
+
+  uint64_t estimateFlatSize() const override;
+
+  using BaseVector::toString;
+
+  std::string toString(vector_size_t index) const override;
+
+  void validate(const VectorValidateOptions& options) const override;
+
+  VectorPtr testingCopyPreserveEncodings(
+      velox::memory::MemoryPool* pool = nullptr) const override;
+
+  void transferOrCopyTo(velox::memory::MemoryPool* pool) override;
+
+  BaseVector* loadedVector() override;
+
+  const BaseVector* loadedVector() const override {
+    return const_cast<UnionVector*>(this)->loadedVector();
+  }
+
+  bool mayHaveNullsRecursive() const override;
+
+  void setType(const TypePtr& type) override;
+
+  bool containsLazyNotLoaded() const {
+    return containsLazyNotLoaded_;
+  }
+
+ private:
+  void resizeTags(
+    vector_size_t currentSize,
+    vector_size_t newSize,
+    velox::memory::MemoryPool* pool);
+
+  static BufferPtr computeOffsets(
+    vector_size_t length,
+    const BufferPtr& tags,
+    const BufferPtr& nulls,
+    size_t numChildren,
+    velox::memory::MemoryPool* pool,
+    std::vector<vector_size_t>& childCounts);
+
+  vector_size_t ensureAndAllocateChild(uint8_t tag, vector_size_t size);
+
+  void updateContainsLazyNotLoaded() const;
+
+  uint64_t retainedSizeImpl(uint64_t& totalStringBufferSize) const override;
+
+  // child vectors, one per type in the UnionType.
+  mutable std::vector<VectorPtr> children_;
+  const size_t childrenSize_;
+
+
+  // tags buffer (uint8_t).
+  BufferPtr tags_;
+  const uint8_t* rawTags_;
+
+  // offsets buffer (vector_size_t).
+  BufferPtr offsets_;
+  const vector_size_t* rawOffsets_;
+
+  mutable bool childrenLoaded_ = false;
+  mutable bool containsLazyNotLoaded_ = false;
+};
+
 class RowVector : public BaseVector {
  public:
   RowVector(const RowVector&) = delete;
@@ -757,6 +946,7 @@ class MapVector : public ArrayVectorBase {
   bool sortedKeys_;
 };
 
+using UnionVectorPtr = std::shared_ptr<UnionVector>;
 using RowVectorPtr = std::shared_ptr<RowVector>;
 using ArrayVectorPtr = std::shared_ptr<ArrayVector>;
 using MapVectorPtr = std::shared_ptr<MapVector>;
@@ -771,6 +961,12 @@ inline BufferPtr allocateOffsets(vector_size_t size, memory::MemoryPool* pool) {
 // zero.
 inline BufferPtr allocateSizes(vector_size_t size, memory::MemoryPool* pool) {
   return AlignedBuffer::allocate<vector_size_t>(size, pool, 0);
+}
+
+// Allocates a buffer to fit at least 'size' tags and initializes them to
+// zero.
+inline BufferPtr allocateTags(vector_size_t size, memory::MemoryPool* pool) {
+  return AlignedBuffer::allocate<uint8_t>(size, pool, 0);
 }
 
 } // namespace facebook::velox

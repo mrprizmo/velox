@@ -416,6 +416,111 @@ TEST(TypeTest, map) {
   testTypeSerde(mapType);
 }
 
+TEST(TypeTest, union) {
+  const auto unionType = UNION({INTEGER(), VARCHAR()});
+  ASSERT_EQ(unionType->toString(), "UNION<INTEGER,VARCHAR>");
+  ASSERT_EQ(unionType->size(), 2);
+  ASSERT_EQ(unionType->childAt(0)->toString(), "INTEGER");
+  ASSERT_EQ(unionType->childAt(1)->toString(), "VARCHAR");
+  ASSERT_EQ(unionType->kind(), TypeKind::UNION);
+  EXPECT_STREQ(unionType->kindName(), "UNION");
+  ASSERT_FALSE(unionType->isPrimitiveType());
+  int32_t num = 0;
+  for (auto& i : *unionType) {
+    if (num == 0) {
+      ASSERT_EQ(i->toString(), "INTEGER");
+    } else if (num == 1) {
+      ASSERT_EQ(i->toString(), "VARCHAR");
+    } else {
+      FAIL();
+    }
+    ++num;
+  }
+  ASSERT_EQ(num, 2);
+
+  EXPECT_STREQ(unionType->name(), "UNION");
+  ASSERT_EQ(unionType->parameters().size(), 2);
+  ASSERT_EQ(unionType->asUnion().children().size(), 2);
+  for (auto i = 0; i < 2; ++i) {
+    ASSERT_TRUE(unionType->parameters()[i].kind == TypeParameterKind::kType);
+    ASSERT_EQ(*unionType->parameters()[i].type, *unionType->childAt(i));
+  }
+
+  ASSERT_EQ(
+      *unionType,
+      *getType(
+          "UNION",
+          {
+              TypeParameter(INTEGER()),
+              TypeParameter(VARCHAR()),
+          }));
+
+  ASSERT_EQ(approximateTypeEncodingwidth(unionType), 3);
+
+  testTypeSerde(unionType);
+}
+
+TEST(TypeTest, unionWithDuplicateTypes) {
+  const auto union1 =
+      UNION({INTEGER(), VARCHAR(), INTEGER(), VARCHAR(), BIGINT()});
+  ASSERT_EQ(union1->size(), 3);
+
+  const auto children = union1->children();
+  ASSERT_EQ(children[0]->toString(), "BIGINT");
+  ASSERT_EQ(children[1]->toString(), "INTEGER");
+  ASSERT_EQ(children[2]->toString(), "VARCHAR");
+}
+
+TEST(TypeTest, unionEqualsOperator) {
+  const auto union1 = UNION({INTEGER(), VARCHAR()});
+  const auto union2 = UNION({INTEGER(), VARCHAR()});
+  const auto union3 = UNION({VARCHAR(), INTEGER()});
+
+  ASSERT_EQ(*union1, *union2);
+  ASSERT_EQ(*union1, *union3);
+
+  const auto union4 = UNION({INTEGER(), BIGINT()});
+  ASSERT_NE(*union1, *union4);
+}
+
+TEST(TypeTest, serdeCacheUnion) {
+  std::vector<TypePtr> types(100);
+  types[0] = INTEGER();
+  for (auto i = 1; i < 100; ++i) {
+    types[i] = ARRAY(types[i - 1]);
+  }
+  auto unionType = UNION(std::move(types));
+
+  auto& cache = serializedTypeCache();
+  ASSERT_FALSE(cache.isEnabled());
+
+  testTypeSerde(unionType);
+  ASSERT_EQ(0, cache.size());
+
+  cache.enable();
+  SCOPE_EXIT {
+    cache.disable();
+    cache.clear();
+    deserializedTypeCache().clear();
+  };
+
+  folly::dynamic serializedType;
+  for (auto i = 0; i < 10; ++i) {
+    serializedType = unionType->serialize();
+    ASSERT_EQ(1, cache.size());
+  }
+
+  auto serializedCache = cache.serialize();
+
+  ASSERT_EQ(0, deserializedTypeCache().size());
+  deserializedTypeCache().deserialize(serializedCache);
+  ASSERT_EQ(1, deserializedTypeCache().size());
+
+  auto copy = velox::ISerializable::deserialize<Type>(serializedType);
+  ASSERT_EQ(unionType->toString(), copy->toString());
+  ASSERT_EQ(*unionType, *copy);
+}
+
 TEST(TypeTest, row) {
   VELOX_ASSERT_THROW(ROW({{"a", nullptr}}), "Child types cannot be null");
   auto row0 = ROW({{"a", INTEGER()}, {"b", ROW({{"a", BIGINT()}})}});
@@ -503,7 +608,7 @@ TEST(TypeTest, wideRow) {
       "Field not found: blah. Available fields are: c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21, c22, c23, c24, c25, c26, c27, c28, c29, c30, c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45, c46, c47, c48, c49, ...950 more");
 }
 
-TEST(TypeTest, serdeCache) {
+TEST(TypeTest, serdeCacheRow) {
   std::vector<std::string> names;
   names.reserve(100);
   for (auto i = 0; i < 100; ++i) {
@@ -798,6 +903,9 @@ TEST(TypeTest, equality) {
   EXPECT_FALSE(MAP(REAL(), INTEGER())
                    ->operator==(*ROW({{"a", REAL()}, {"b", INTEGER()}})));
   EXPECT_FALSE(ARRAY(REAL())->operator==(*ROW({{"a", REAL()}})));
+
+  EXPECT_FALSE(UNION({ARRAY(INTEGER())})->operator==(*UNION({ARRAY(REAL())})));
+  EXPECT_FALSE(UNION({INTEGER(), REAL()})->operator==(*UNION({INTEGER()})));
 }
 
 TEST(TypeTest, cpp2Type) {

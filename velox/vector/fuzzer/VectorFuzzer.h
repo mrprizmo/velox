@@ -335,6 +335,28 @@ class VectorFuzzer {
   /// constant or dictionary-encoded vectors at any level.
   RowVectorPtr fuzzInputFlatRow(const RowTypePtr& rowType);
 
+  std::vector<vector_size_t> randomPartition(vector_size_t size, size_t k);
+
+  void fuzzOffsetsAndTags(
+      BufferPtr& offsets,
+      BufferPtr& tags,
+      const std::vector<vector_size_t>& subSizes);
+
+  UnionVectorPtr fuzzUnion(const UnionTypePtr& unionType);
+
+  UnionVectorPtr fuzzUnion(
+      const UnionTypePtr& unionType,
+      vector_size_t size,
+      bool allowTopLevelNulls = true,
+      const std::vector<AbstractInputGeneratorPtr>& inputGenerators = {});
+
+  UnionVectorPtr fuzzUnion(
+      const UnionTypePtr& unionType,
+      std::vector<VectorPtr>&& children,
+      bool allowTopLevelNulls = true);
+
+  UnionVectorPtr fuzzUnion(std::vector<VectorPtr>&& children);
+
   /// Generates a random type, including maps, vectors, and arrays. maxDepth
   /// limits the maximum level of nesting for complex types. maxDepth <= 1 means
   /// no complex types are allowed.
@@ -367,6 +389,14 @@ class VectorFuzzer {
       const std::vector<TypePtr>& scalarTypes,
       int maxDepth = 5);
 
+  TypePtr randUnionTypeByWidth(
+      const std::vector<TypePtr>& scalarTypes,
+      int minWidth);
+
+  UnionTypePtr randUnionType(int maxDepth = 5);
+  UnionTypePtr randUnionType(
+      const std::vector<TypePtr>& scalarTypes,
+      int maxDepth = 5);
   /// Generates a random map type where keys cannot be nested. maxDepth limits
   /// the maximum level of nesting for values.
   TypePtr randMapType(int maxDepth = 5);
@@ -529,6 +559,18 @@ RowTypePtr randRowType(
 
 /// Generate a random RowType with a minimal width.
 TypePtr randRowTypeByWidth(
+    FuzzerGenerator& rng,
+    const std::vector<TypePtr>& scalarTypes,
+    int minWidth);
+
+UnionTypePtr randUnionType(FuzzerGenerator& rng, int maxDepth = 5);
+
+UnionTypePtr randUnionType(
+    FuzzerGenerator& rng,
+    const std::vector<TypePtr>& scalarTypes,
+    int maxDepth = 5);
+
+TypePtr randUnionTypeByWidth(
     FuzzerGenerator& rng,
     const std::vector<TypePtr>& scalarTypes,
     int minWidth);

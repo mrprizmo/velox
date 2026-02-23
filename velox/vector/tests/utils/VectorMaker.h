@@ -118,6 +118,12 @@ class VectorMaker {
       const std::shared_ptr<const RowType>& rowType,
       vector_size_t size);
 
+  UnionVectorPtr unionVector(
+    const TypePtr& type,
+    vector_size_t size,
+    std::function<Variant(vector_size_t /*row*/)> valueAt,
+    std::function<bool(vector_size_t /*row*/)> isNullAt = nullptr);
+
   template <typename T>
   FlatVectorPtr<EvalType<T>> flatVector(
       vector_size_t size,
@@ -1014,6 +1020,39 @@ class VectorMaker {
         std::make_shared<RowVector>(
             pool_, rowType, nullptr, 1, std::move(fields)));
   }
+
+  VectorPtr constantUnion(
+    const UnionTypePtr& unionType,
+    const Variant& value,
+    vector_size_t size) {
+  VELOX_CHECK_EQ(value.kind(), TypeKind::UNION, "Variant must be of UNION kind");
+
+  const auto& innerValue = value.value<TypeKind::UNION>();
+  auto innerType = innerValue.inferType();
+
+  uint8_t tag = unionType->typeIndex(innerType);
+
+  std::vector<VectorPtr> children(unionType->size(), nullptr);
+  children[tag] = VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
+    toFlatVector, unionType->childAt(tag)->kind(), innerValue);
+
+  BufferPtr tags = allocateTags(1, pool_);
+  tags->asMutable<uint8_t>()[0] = tag;
+
+  BufferPtr offsets = allocateOffsets(1, pool_);
+  offsets->asMutable<vector_size_t>()[0] = 0;
+
+  auto baseUnion = std::make_shared<UnionVector>(
+      pool_,
+      unionType,
+      nullptr,
+      1,
+      std::move(children),
+      std::move(tags),
+      std::move(offsets));
+
+  return BaseVector::wrapInConstant(size, 0, std::move(baseUnion));
+}
 
   template <typename T = BaseVector>
   static std::shared_ptr<T> flatten(const VectorPtr& vector) {

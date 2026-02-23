@@ -204,6 +204,18 @@ void applyTyped<TypeKind::ROW>(
       throwOnNestedNull);
 }
 
+template <>
+void applyTyped<TypeKind::UNION>(
+    const SelectivityVector& rows,
+    DecodedVector& arrayDecoded,
+    DecodedVector& elementsDecoded,
+    DecodedVector& searchDecoded,
+    exec::EvalCtx& context,
+    FlatVector<bool>& flatResult,
+    bool throwOnNestedNull) {
+  VELOX_NYI();
+}
+
 class ArrayContainsFunction : public exec::VectorFunction {
  public:
   explicit ArrayContainsFunction(bool throwOnNestedNull)

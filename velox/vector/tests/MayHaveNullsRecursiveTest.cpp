@@ -182,6 +182,44 @@ TEST_F(MayHaveNullsRecursiveTest, rowNullFree) {
   ASSERT_FALSE(rowVector->mayHaveNullsRecursive());
 }
 
+TEST_F(MayHaveNullsRecursiveTest, unionHasNulls) {
+  auto unionType = UNION({INTEGER(), VARCHAR()});
+
+  auto unionVector = vectorMaker_.unionVector(
+      unionType,
+      10,
+      [](vector_size_t i) {
+        return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+      },
+      [](vector_size_t i) { return i % 5 == 0; });
+
+  ASSERT_TRUE(unionVector->mayHaveNullsRecursive());
+}
+
+TEST_F(MayHaveNullsRecursiveTest, unionChildrenHaveNulls) {
+  auto unionType = UNION({INTEGER(), VARCHAR()});
+
+  auto unionVector =
+      vectorMaker_.unionVector(unionType, 10, [](vector_size_t i) {
+        if (i == 2)
+          return Variant::null(TypeKind::INTEGER);
+        return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+      });
+
+  ASSERT_TRUE(unionVector->mayHaveNullsRecursive());
+}
+
+TEST_F(MayHaveNullsRecursiveTest, unionNullFree) {
+  auto unionType = UNION({INTEGER(), VARCHAR()});
+
+  auto unionVector =
+      vectorMaker_.unionVector(unionType, 10, [](vector_size_t i) {
+        return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+      });
+
+  ASSERT_FALSE(unionVector->mayHaveNullsRecursive());
+}
+
 TEST_F(MayHaveNullsRecursiveTest, constantNull) {
   auto constantVector = vectorMaker_.constantVector<int32_t>({std::nullopt});
 

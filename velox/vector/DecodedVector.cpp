@@ -85,6 +85,7 @@ VectorPtr DecodedVector::decodeImpl(
     case VectorEncoding::Simple::ARRAY:
     case VectorEncoding::Simple::FLAT_MAP:
     case VectorEncoding::Simple::MAP:
+    case VectorEncoding::Simple::UNION:
     case VectorEncoding::Simple::LAZY:
       isIdentityMapping_ = true;
       setBaseData(vector, rows, sharedBase);
@@ -237,6 +238,7 @@ void DecodedVector::combineWrappers(
       case VectorEncoding::Simple::ARRAY:
       case VectorEncoding::Simple::FLAT_MAP:
       case VectorEncoding::Simple::MAP:
+      case VectorEncoding::Simple::UNION:
         setBaseData(values, rows, sharedBase);
         return;
       case VectorEncoding::Simple::DICTIONARY:
@@ -371,6 +373,7 @@ void DecodedVector::setBaseData(
     case VectorEncoding::Simple::ARRAY:
     case VectorEncoding::Simple::FLAT_MAP:
     case VectorEncoding::Simple::MAP:
+    case VectorEncoding::Simple::UNION:
       setFlatNulls(*vector, rows);
       break;
     case VectorEncoding::Simple::CONSTANT:

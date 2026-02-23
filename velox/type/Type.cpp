@@ -58,6 +58,7 @@ const auto& typeKindNames() {
       {TypeKind::VARCHAR, "VARCHAR"},
       {TypeKind::VARBINARY, "VARBINARY"},
       {TypeKind::TIMESTAMP, "TIMESTAMP"},
+      {TypeKind::UNION, "UNION"},
       {TypeKind::ARRAY, "ARRAY"},
       {TypeKind::MAP, "MAP"},
       {TypeKind::ROW, "ROW"},
@@ -268,6 +269,189 @@ void Type::registerSerDe() {
   registry.Register("TimeType", TimeType::deserialize);
 }
 
+namespace {
+std::vector<TypeParameter> createTypeParameters(
+    const std::vector<TypePtr>& children) {
+  std::vector<TypeParameter> parameters;
+  parameters.reserve(children.size());
+  for (const auto& child : children) {
+    parameters.emplace_back(child);
+  }
+  return parameters;
+}
+
+std::string TypesToString(const std::vector<TypePtr>& types) {
+  std::stringstream ss;
+  ss << "types: {";
+  if (!types.empty()) {
+    for (const auto& type : types) {
+      ss << (type ? type->toString() : "NULL") << ", ";
+    }
+    ss.seekp(-2, std::ios_base::cur);
+  } else {
+    ss << " ";
+  }
+  ss << "}";
+  return ss.str();
+}
+} // namespace
+
+UnionType::UnionType(std::vector<TypePtr>&& types) {
+  std::map<std::string, TypePtr> name_to_type;
+
+  VELOX_USER_DCHECK(
+      !types.empty(), "Union must contains at least one child type");
+
+  for (const auto& type : types) {
+    VELOX_CHECK_NOT_NULL(type, "Child types of UNION cannot be null");
+
+    VELOX_USER_CHECK(
+        type->kind() != TypeKind::UNION, "Nested UNION types are not allowed");
+
+    name_to_type[type->toString()] = type;
+  }
+
+  VELOX_USER_DCHECK(
+      name_to_type.size() <= TypeTraits<TypeKind::UNION>::maxSubTypes,
+      fmt::format(
+          "UNION type with more than {} nested types is not allowed",
+          TypeTraits<TypeKind::UNION>::maxSubTypes));
+
+  children_.reserve(name_to_type.size());
+  for (const auto& [name, type] : name_to_type) {
+    children_.push_back(type);
+  }
+}
+
+UnionType::~UnionType() {
+  auto* parameters = parameters_.load(std::memory_order_acquire);
+  delete parameters;
+}
+
+const std::vector<TypeParameter>* UnionType::ensureParameters() const {
+  auto newParameters = std::make_unique<std::vector<TypeParameter>>(
+      createTypeParameters(children_));
+
+  std::vector<TypeParameter>* oldParameters = nullptr;
+  if (!parameters_.compare_exchange_strong(
+          oldParameters,
+          newParameters.get(),
+          std::memory_order_acq_rel,
+          std::memory_order_acquire)) [[unlikely]] {
+    return oldParameters;
+  }
+
+  return newParameters.release();
+}
+
+bool UnionType::isOrderable() const {
+  return std::all_of(
+      children_.cbegin(), children_.cend(), [](const auto& child) {
+        return child->isOrderable();
+      });
+}
+
+bool UnionType::isComparable() const {
+  return std::all_of(
+      children_.cbegin(), children_.cend(), [](const auto& child) {
+        return child->isComparable();
+      });
+}
+
+bool UnionType::equivalent(const Type& other) const {
+  if (&other == this) {
+    return true;
+  }
+  if (!Type::hasSameTypeId(other)) {
+    return false;
+  }
+  const auto& otherTyped = other.asUnion();
+  if (otherTyped.size() != size()) {
+    return false;
+  }
+  for (size_t i = 0; i < size(); ++i) {
+    if (!childAt(i)->equivalent(*otherTyped.childAt(i))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool UnionType::equals(const Type& other) const {
+  if (&other == this) {
+    return true;
+  }
+  if (!Type::hasSameTypeId(other)) {
+    return false;
+  }
+  const auto& otherTyped = other.asUnion();
+  if (otherTyped.size() != size()) {
+    return false;
+  }
+  for (size_t i = 0; i < size(); ++i) {
+    if (*childAt(i) != *otherTyped.childAt(i)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string UnionType::toString() const {
+  std::stringstream ss;
+  ss << (TypeTraits<TypeKind::UNION>::name) << "<";
+  bool any = false;
+  for (size_t i = 0; i < children_.size(); ++i) {
+    if (any) {
+      ss << ",";
+    }
+    ss << children_.at(i)->toString();
+    any = true;
+  }
+  ss << ">";
+  return ss.str();
+}
+
+size_t UnionType::hashKind() const {
+  if (!hashKindComputed_.load(std::memory_order_relaxed)) {
+    hashKind_ = TypeBase<TypeKind::UNION>::hashKind();
+    hashKindComputed_ = true;
+  }
+  return hashKind_;
+}
+
+namespace {
+folly::dynamic makeTypeRef(int32_t id) {
+  folly::dynamic ref = folly::dynamic::object;
+  ref["name"] = "Type";
+  ref["ref"] = id;
+  return ref;
+}
+} // namespace
+
+folly::dynamic UnionType::serialize() const {
+  auto& cache = serializedTypeCache();
+  const bool useCache =
+      cache.isEnabled() && size() >= cache.options().minRowTypeSize;
+
+  if (useCache) {
+    if (auto id = cache.get(*this)) {
+      return makeTypeRef(id.value());
+    }
+  }
+
+  folly::dynamic obj = folly::dynamic::object;
+  obj["name"] = "Type";
+  obj["type"] = TypeTraits<TypeKind::UNION>::name;
+  obj["cTypes"] = velox::ISerializable::serialize(children_);
+
+  if (useCache) {
+    const auto id = cache.put(*this, std::move(obj));
+    return makeTypeRef(id);
+  }
+
+  return obj;
+}
+
 std::string ArrayType::toString() const {
   return "ARRAY<" + child_->toString() + ">";
 }
@@ -359,16 +543,6 @@ folly::dynamic MapType::serialize() const {
 }
 
 namespace {
-std::vector<TypeParameter> createTypeParameters(
-    const std::vector<TypePtr>& children) {
-  std::vector<TypeParameter> parameters;
-  parameters.reserve(children.size());
-  for (const auto& child : children) {
-    parameters.push_back(TypeParameter(child));
-  }
-  return parameters;
-}
-
 std::string namesAndTypesToString(
     const std::vector<std::string>& names,
     const std::vector<TypePtr>& types) {
@@ -394,7 +568,6 @@ std::string namesAndTypesToString(
   ss << "}]";
   return ss.str();
 }
-
 } // namespace
 
 RowType::RowType(std::vector<std::string>&& names, std::vector<TypePtr>&& types)
@@ -692,15 +865,6 @@ DeserializedTypeCache& deserializedTypeCache() {
   return cache;
 }
 
-namespace {
-folly::dynamic makeTypeRef(int32_t id) {
-  folly::dynamic ref = folly::dynamic::object;
-  ref["name"] = "Type";
-  ref["ref"] = id;
-  return ref;
-}
-} // namespace
-
 folly::dynamic RowType::serialize() const {
   auto& cache = serializedTypeCache();
   const bool useCache =
@@ -937,6 +1101,10 @@ void OpaqueType::registerSerializationTypeErased(
   registry.reverse[persistentName] = type;
 }
 
+UnionTypePtr UNION(std::vector<TypePtr> types) {
+  return TypeFactory<TypeKind::UNION>::create(std::move(types));
+}
+
 ArrayTypePtr ARRAY(TypePtr elementType) {
   return TypeFactory<TypeKind::ARRAY>::create(std::move(elementType));
 }
@@ -1051,6 +1219,11 @@ TypePtr createType(TypeKind kind, std::vector<TypePtr>&& children) {
 }
 
 template <>
+TypePtr createType<TypeKind::UNION>(std::vector<TypePtr>&& children) {
+  return UNION(std::move(children));
+}
+
+template <>
 TypePtr createType<TypeKind::ROW>(std::vector<TypePtr>&& /*children*/) {
   std::string name{TypeTraits<TypeKind::ROW>::name};
   VELOX_USER_FAIL("Not supported for kind: {}", name);
@@ -1105,7 +1278,7 @@ std::string Type::toSummaryString(TypeSummaryOptions options) const {
     }
     out << ")";
   } else {
-    if (kind_ == TypeKind::ROW) {
+    if (kind_ == TypeKind::ROW || kind_ == TypeKind::UNION) {
       out << "(" << size() << ")";
     }
   }
@@ -1239,6 +1412,19 @@ void toTypeSql(const TypePtr& type, std::ostream& out) {
       out << ")";
       break;
     }
+    case TypeKind::UNION: {
+      // Append union(T1, T2,..), e.g. union(bigint, varchar).
+      const auto& unionType = type->asUnion();
+      out << "union(";
+      for (auto i = 0; i < type->size(); ++i) {
+        if (i > 0) {
+          out << ", ";
+        }
+        toTypeSql(type->childAt(i), out);
+      }
+      out << ")";
+      break;
+    }
     default:
       if (type->isPrimitiveType()) {
         out << type->toString();
@@ -1367,6 +1553,25 @@ class DecimalParametricType {
   }
 };
 
+class UnionParametricType {
+ public:
+  static TypePtr create(const std::vector<TypeParameter>& parameters) {
+    for (const auto& parameter : parameters) {
+      VELOX_USER_CHECK(parameter.kind == TypeParameterKind::kType);
+      VELOX_USER_CHECK_NOT_NULL(parameter.type);
+    }
+
+    std::vector<TypePtr> argumentTypes;
+    argumentTypes.reserve(parameters.size());
+
+    for (const auto& parameter : parameters) {
+      argumentTypes.push_back(parameter.type);
+    }
+
+    return UNION(std::move(argumentTypes));
+  }
+};
+
 class ArrayParametricType {
  public:
   static TypePtr create(const std::vector<TypeParameter>& parameters) {
@@ -1440,6 +1645,7 @@ using ParametricTypeMap = std::unordered_map<
 const ParametricTypeMap& parametricBuiltinTypes() {
   static const ParametricTypeMap kTypes = {
       {"DECIMAL", DecimalParametricType::create},
+      {"UNION", UnionParametricType::create},
       {"ARRAY", ArrayParametricType::create},
       {"MAP", MapParametricType::create},
       {"ROW", RowParametricType::create},

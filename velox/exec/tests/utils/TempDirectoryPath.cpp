@@ -16,7 +16,7 @@
 
 #include "velox/exec/tests/utils/TempDirectoryPath.h"
 
-#include "boost/filesystem.hpp"
+#include <filesystem>
 
 namespace facebook::velox::exec::test {
 
@@ -28,10 +28,10 @@ std::shared_ptr<TempDirectoryPath> TempDirectoryPath::create(bool injectFault) {
 TempDirectoryPath::~TempDirectoryPath() {
   LOG(INFO) << "TempDirectoryPath:: removing all files from " << tempPath_;
   try {
-    boost::filesystem::remove_all(tempPath_.c_str());
+    std::filesystem::remove_all(tempPath_.c_str());
   } catch (...) {
     LOG(WARNING)
-        << "TempDirectoryPath:: destructor failed while calling boost::filesystem::remove_all";
+        << "TempDirectoryPath:: destructor failed while calling std::filesystem::remove_all";
   }
 }
 

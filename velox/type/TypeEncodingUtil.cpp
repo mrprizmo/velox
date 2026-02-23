@@ -45,6 +45,13 @@ size_t approximateTypeEncodingwidth(const TypePtr& type) {
       }
       return fieldWidth;
     }
+    case TypeKind::UNION: {
+      size_t fieldWidth = 0;
+      for (const auto& child : type->asUnion().children()) {
+        fieldWidth += approximateTypeEncodingwidth(child);
+      }
+      return fieldWidth + 1; // 1 for tags
+    }
     default:
       VELOX_UNREACHABLE("Unsupported type: {}", type->toString());
   }

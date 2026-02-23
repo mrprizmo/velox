@@ -461,6 +461,67 @@ VectorPtr newRow(
       options.pool, source.type(), std::move(nulls), size, std::move(children));
 }
 
+void toUnionRanges(
+    const UnionVector& source,
+    std::vector<vector_size_t>& childNextOffsets,
+    std::vector<std::vector<BaseVector::CopyRange>>& childRanges,
+    uint8_t* newTags,
+    vector_size_t* newOffsets, 
+    const folly::Range<const BaseVector::CopyRange*>& ranges) {
+  for (auto& range : ranges) {
+    for (vector_size_t i = 0; i < range.count; ++i) {
+      auto srcIdx = range.sourceIndex + i;
+      auto trgIdx = range.targetIndex + i;
+
+      if (source.BaseVector::isNullAt(srcIdx)) {
+        newTags[trgIdx] = 0;
+        newOffsets[trgIdx] = 0;
+        continue;
+      }
+
+      uint8_t tag = source.tagAt(srcIdx);
+      vector_size_t srcOffset = source.offsetAt(srcIdx);
+      vector_size_t trgOffset = childNextOffsets[tag]++;
+
+      newTags[trgIdx] = tag;
+      newOffsets[trgIdx] = trgOffset;
+
+      childRanges[tag].push_back({srcOffset, trgOffset, 1});
+    }
+  }
+}
+
+VectorPtr newUnion(
+    const EncodedVectorCopyOptions& options,
+    const UnionVector& source,
+    const folly::Range<const BaseVector::CopyRange*>& ranges) {
+  auto size = newTargetSize(ranges);
+  
+  auto tags = AlignedBuffer::allocate<uint8_t>(size, options.pool);
+  auto offsets = allocateIndices(size, options.pool);
+  auto* rawTags = tags->asMutable<uint8_t>();
+  auto* rawOffsets = offsets->asMutable<vector_size_t>();
+  auto nulls = newNulls(size, options.pool, source.rawNulls(), ranges);
+
+  auto numChildren = source.childrenSize();
+  std::vector<std::vector<BaseVector::CopyRange>> childRanges(numChildren);
+  std::vector<vector_size_t> childNextOffsets(numChildren, 0);
+
+  toUnionRanges(source, childNextOffsets, childRanges, rawTags, rawOffsets, ranges);
+
+  std::vector<VectorPtr> children(numChildren);
+  for (uint32_t i = 0; i < numChildren; ++i) {
+    if (childRanges[i].empty()) {
+      continue;
+    }
+    copyImpl(options, source.childAt(i), childRanges[i], children[i], false);
+  }
+
+  return std::make_shared<UnionVector>(
+      options.pool, source.type(), std::move(nulls), size, std::move(children), 
+      std::move(tags), std::move(offsets));
+}
+
 VectorPtr newMap(
     const EncodedVectorCopyOptions& options,
     const MapVector& source,
@@ -689,6 +750,156 @@ void copyIntoRow(
   }
 }
 
+bool needCompactUnion(
+    const EncodedVectorCopyOptions& options,
+    const UnionVector& vector) {
+
+  if (options.compactNestedThreshold >= 1.0) {
+    return false;
+  }
+
+  vector_size_t usedRows = vector.size();
+
+  vector_size_t totalChildCapacity = 0;
+  for (const auto& child : vector.children()) {
+    if (child) {
+      totalChildCapacity += child->size();
+    }
+  }
+
+  return usedRows < options.compactNestedThreshold * totalChildCapacity;
+}
+
+std::vector<std::vector<BaseVector::CopyRange>> compactUnionRanges(
+    const UnionVector& vector,
+    vector_size_t* newOffsets) {
+
+  auto numChildren = vector.childrenSize();
+  std::vector<std::vector<BaseVector::CopyRange>> allChildRanges(numChildren);
+  
+  std::vector<vector_size_t> nextOffsets(numChildren, 0);
+
+  for (vector_size_t i = 0; i < vector.size(); ++i) {
+    if (vector.BaseVector::isNullAt(i)) {
+      newOffsets[i] = 0;
+      continue;
+    }
+
+    uint8_t tag = vector.tagAt(i);
+    vector_size_t oldOffset = vector.offsetAt(i);
+    vector_size_t trgOffset = nextOffsets[tag]++;
+
+    newOffsets[i] = trgOffset;
+
+    auto& ranges = allChildRanges[tag];
+    if (!ranges.empty() &&
+        ranges.back().sourceIndex + ranges.back().count == oldOffset &&
+        ranges.back().targetIndex + ranges.back().count == trgOffset) {
+      ranges.back().count++;
+    } else {
+      ranges.push_back({oldOffset, trgOffset, 1});
+    }
+  }
+
+  return allChildRanges;
+}
+
+void copyIntoUnion(
+    const EncodedVectorCopyOptions& options,
+    const UnionVector& source,
+    const folly::Range<const BaseVector::CopyRange*>& ranges,
+    VectorPtr& target,
+    bool targetMutable) {
+  
+  const auto size = targetSize(target->size(), ranges);
+  auto* targetUnion = target->asUnchecked<UnionVector>();
+  auto* sourceNulls = source.rawNulls();
+
+  if (targetMutable) {
+    target->resize(size);
+    target->resetDataDependentFlags(nullptr);
+
+    auto numChildren = source.childrenSize();
+    auto* rawTags = targetUnion->tags()->asMutable<uint8_t>();
+    auto* rawOffsets = targetUnion->offsets()->asMutable<vector_size_t>();
+
+
+    if (needCompactUnion(options, *targetUnion)) {
+      auto compactRanges = compactUnionRanges(*targetUnion, rawOffsets);
+      for (uint32_t i = 0; i < numChildren; ++i) {
+        auto& child = targetUnion->childAt(i);
+        if (child) {
+          compactNestedVector(options, compactRanges[i], child, child.use_count() == 1);
+        }
+      }
+    }
+
+    std::vector<vector_size_t> childNextOffsets(numChildren);
+    for (uint32_t i = 0; i < numChildren; ++i) {
+      childNextOffsets[i] = targetUnion->childAt(i) ? targetUnion->childAt(i)->size() : 0;
+    }
+
+    std::vector<std::vector<BaseVector::CopyRange>> childRanges(numChildren);
+
+    toUnionRanges(source, childNextOffsets, childRanges, rawTags, rawOffsets, ranges);
+
+    for (uint32_t i = 0; i < numChildren; ++i) {
+      if (childRanges[i].empty()) continue;
+
+      targetUnion->ensureChild(i);
+      auto& targetChild = targetUnion->childAt(i);
+      bool targetChildMutable = targetChild && targetChild.use_count() == 1;
+      copyImpl(options, source.childAt(i), childRanges[i], targetChild, targetChildMutable);
+    }
+    
+    setSourceNulls(sourceNulls, *targetUnion, ranges);
+
+  } else {
+    BufferPtr nulls;
+    if (target->rawNulls() || sourceNulls) {
+      nulls = combineNulls(size, options.pool, target->rawNulls(), target->size(), sourceNulls, ranges);
+    }
+
+    auto offsets = allocateIndices(size, options.pool);
+    auto* rawOffsets = offsets->asMutable<vector_size_t>();
+    std::memcpy(rawOffsets, targetUnion->rawOffsets(), sizeof(vector_size_t) * targetUnion->size());
+    
+    auto tags = allocateTags(size, options.pool);
+    auto* rawTags = tags->asMutable<uint8_t>();
+    std::memcpy(rawTags, targetUnion->rawTags(), targetUnion->size());
+
+    auto numChildren = source.childrenSize();
+    std::vector<VectorPtr> newChildren(numChildren, nullptr);
+    
+    auto compactRanges = compactUnionRanges(*targetUnion, rawOffsets);
+    for (uint32_t i = 0; i < numChildren; ++i) {
+      if (compactRanges[i].empty()) {
+        continue;
+      }
+      copyImpl(options, targetUnion->childAt(i), compactRanges[i], newChildren[i], false);
+    }
+
+    std::vector<vector_size_t> childNextOffsets(numChildren);
+    for (uint32_t i = 0; i < numChildren; ++i) {
+      childNextOffsets[i] = newChildren[i] ? newChildren[i]->size() : 0;
+    }
+
+    std::vector<std::vector<BaseVector::CopyRange>> childRanges(numChildren);
+    toUnionRanges(source, childNextOffsets, childRanges, rawTags, rawOffsets, ranges);
+
+    for (uint32_t i = 0; i < numChildren; ++i) {
+      if (childRanges[i].empty()) {
+        continue;
+      }
+      copyImpl(options, source.childAt(i), childRanges[i], newChildren[i], true);
+    }
+
+    target = std::make_shared<UnionVector>(
+        options.pool, target->type(), std::move(nulls), size, 
+        std::move(newChildren), std::move(tags), std::move(offsets));
+  }
+}
+
 void copyIntoMap(
     const EncodedVectorCopyOptions& options,
     const MapVector& source,
@@ -886,6 +1097,14 @@ void copyIntoComplex(
             target,
             targetMutable);
         break;
+      case VectorEncoding::Simple::UNION:
+        copyIntoUnion(
+            options,
+            *sourceBase->asChecked<UnionVector>(),
+            ranges,
+            target,
+            targetMutable);
+        break;
       default:
         VELOX_UNREACHABLE();
     }
@@ -983,6 +1202,7 @@ void copyIntoExisting(
     case VectorEncoding::Simple::ROW:
     case VectorEncoding::Simple::MAP:
     case VectorEncoding::Simple::ARRAY:
+    case VectorEncoding::Simple::UNION:
       copyIntoComplex(
           options, decodedSource, sourceBase, ranges, target, targetMutable);
       break;
@@ -1045,6 +1265,9 @@ void copyImpl(
       break;
     case VectorEncoding::Simple::ARRAY:
       target = newArray(options, *source->asUnchecked<ArrayVector>(), ranges);
+      break;
+    case VectorEncoding::Simple::UNION:
+      target = newUnion(options, *source->asUnchecked<UnionVector>(), ranges);
       break;
     case VectorEncoding::Simple::LAZY:
       VELOX_CHECK(!sourceBase->isLazy());

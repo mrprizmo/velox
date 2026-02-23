@@ -141,3 +141,24 @@ TEST_F(IsWritableVectorTest, rowVector) {
   testChildVector(rowVector, rowVector->childAt(1));
   testChildVector(rowVector, rowVector->childAt(2));
 }
+
+TEST_F(IsWritableVectorTest, unionVector) {
+  auto unionType = UNION({INTEGER(), DOUBLE(), VARCHAR()});
+
+  auto unionVector = makeUnionVector(
+      unionType,
+      {Variant(10),
+       Variant(1.5),
+       Variant("hello"),
+       Variant(20),
+       Variant(2.5),
+       Variant("world"),
+       Variant(30),
+       Variant(3.5),
+       Variant("foo")});
+
+  basicTest(unionVector);
+  testChildVector(unionVector, unionVector->childAt(0));
+  testChildVector(unionVector, unionVector->childAt(1));
+  testChildVector(unionVector, unionVector->childAt(2));
+}

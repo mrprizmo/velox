@@ -286,6 +286,44 @@ class RandomInputGenerator<T, std::enable_if_t<std::is_same_v<T, RowType>>>
   std::vector<std::unique_ptr<AbstractInputGenerator>> fieldGenerators_;
 };
 
+template <typename T>
+class RandomInputGenerator<T, std::enable_if_t<std::is_same_v<T, UnionType>>>
+    : public AbstractInputGenerator {
+ public:
+  RandomInputGenerator(
+      size_t seed,
+      const TypePtr& type,
+      std::vector<std::unique_ptr<AbstractInputGenerator>> fieldGenerators,
+      double nullRatio)
+      : AbstractInputGenerator(seed, type, nullptr, nullRatio),
+        fieldGenerators_(std::move(fieldGenerators)) {
+    const auto length = type->size();
+    for (size_t i = 0; i < length; ++i) {
+      if (fieldGenerators_.size() <= i) {
+        fieldGenerators_.push_back(
+            getRandomInputGenerator(seed, type->childAt(i), nullRatio));
+      } else if (fieldGenerators_[i] == nullptr) {
+        fieldGenerators_[i] =
+            getRandomInputGenerator(seed, type->childAt(i), nullRatio);
+      }
+    }
+  }
+
+  ~RandomInputGenerator() override = default;
+
+  variant generate() override {
+    if (coinToss(rng_, nullRatio_)) {
+      return variant::null(TypeKind::UNION);
+    }
+
+    const uint8_t tag = rand<uint8_t>(rng_, 0, fieldGenerators_.size() - 1);
+    return variant::unionVariant(fieldGenerators_[tag]->generate());
+  }
+
+ private:
+  std::vector<std::unique_ptr<AbstractInputGenerator>> fieldGenerators_;
+};
+
 template <typename T, std::enable_if_t<std::is_arithmetic_v<T>, int> = 0>
 class RangeConstrainedGenerator : public AbstractInputGenerator {
  public:

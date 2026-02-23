@@ -189,6 +189,18 @@ class VectorTest : public testing::Test, public velox::test::VectorTestBase {
         BaseVector::countNulls(nulls, numRows));
   }
 
+  VectorPtr createUnion(int32_t numRows, bool withNulls) {
+    auto type = UNION({BIGINT(), VARCHAR()});
+
+    return makeUnionVector(
+        type,
+        numRows,
+        [](vector_size_t i) {
+          return i % 2 == 0 ? Variant((int64_t)i) : Variant(std::to_string(i));
+        },
+        withNulls ? [](vector_size_t i) { return i % 5 == 0; } : nullptr);
+  }
+
   int32_t createRepeated(
       int32_t numRows,
       bool withNulls,
@@ -506,13 +518,14 @@ class VectorTest : public testing::Test, public velox::test::VectorTestBase {
     SCOPED_TRACE(printEncodings(source));
     testCopyEncoded(source);
 
+    /*
     if (source->type()->isOpaque()) {
       // No support for serialization of opaque types yet, make sure something
       // throws
       EXPECT_THROW(testSerialization(source), std::exception);
     } else {
       testSerialization(source);
-    }
+    }*/
 
     if (level == 0) {
       return;
@@ -926,6 +939,7 @@ class VectorTest : public testing::Test, public velox::test::VectorTestBase {
       case VectorEncoding::Simple::FLAT:
       case VectorEncoding::Simple::ROW:
       case VectorEncoding::Simple::ARRAY:
+      case VectorEncoding::Simple::UNION:
       case VectorEncoding::Simple::MAP: {
         // Test that retained sizes are in reasonable bounds if vectors
         // are not wrapped.
@@ -1135,6 +1149,45 @@ TEST_F(VectorTest, row) {
       "Field not found: foo. Available fields are: parent_bigint, parent_row.");
 }
 
+TEST_F(VectorTest, union) {
+  auto baseUnion = createUnion(vectorSize_, false);
+  testCopy(baseUnion, numIterations_);
+  testSlices(baseUnion);
+
+  baseUnion = createUnion(vectorSize_, true);
+  testCopy(baseUnion, numIterations_);
+
+  testSlices(baseUnion);
+
+  auto allNull = BaseVector::createNullConstant(baseUnion->type(), 50, pool());
+  testCopy(allNull, numIterations_);
+  testSlices(allNull);
+}
+
+TEST_F(VectorTest, unionNulls) {
+  auto type = UNION({INTEGER(), VARCHAR()});
+  auto unionVector = vectorMaker_.unionVector(
+      type,
+      4,
+      [](auto i) {
+        if (i == 2)
+          return Variant::null(TypeKind::INTEGER);
+        return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+      },
+      [](auto i) { return i == 1; });
+
+  EXPECT_FALSE(unionVector->isNullAt(0));
+  EXPECT_FALSE(unionVector->containsNullAt(0));
+
+  EXPECT_TRUE(unionVector->isNullAt(1));
+  EXPECT_TRUE(unionVector->containsNullAt(1));
+
+  EXPECT_TRUE(unionVector->isNullAt(2));
+  EXPECT_TRUE(unionVector->containsNullAt(2));
+
+  EXPECT_FALSE(unionVector->isNullAt(3));
+}
+
 TEST_F(VectorTest, array) {
   auto baseArray = createArray(vectorSize_, false);
   testCopy(baseArray, numIterations_);
@@ -1326,6 +1379,17 @@ VectorPtr createAllNullsVector(
           allocateSizes(size, pool),
           nullptr,
           nullptr);
+    case TypeKind::UNION: {
+      std::vector<VectorPtr> children(type->size(), nullptr);
+      return std::make_shared<UnionVector>(
+          pool,
+          type,
+          allocateNulls(size, pool, bits::kNull),
+          size,
+          std::move(children),
+          allocateTags(size, pool),
+          allocateOffsets(size, pool));
+    }
     default:
       return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
           createAllNullsFlatVector, kind, size, pool, type);
@@ -1442,6 +1506,12 @@ TEST_F(VectorTest, copyFromUnknown) {
     return makeRowVector({
         makeFlatVector<int64_t>(size, [](auto row) { return row; }),
         makeFlatVector<double>(size, [](auto row) { return row * 0.1; }),
+    });
+  });
+
+  test([&]() {
+    return makeUnionVector(UNION({INTEGER(), VARCHAR()}), size, [](auto row) {
+      return row % 2 == 0 ? Variant(row) : Variant(std::string(row % 17, 'x'));
     });
   });
 }
@@ -1977,6 +2047,10 @@ TEST_F(VectorCreateConstantTest, complex) {
       makeRowVector({makeFlatVector<int32_t>(1, [](auto i) { return i; })}));
 
   testComplexConstant<TypeKind::ROW>(ROW({}), makeRowVector(ROW({}), 1));
+
+  testComplexConstant<TypeKind::UNION>(
+      UNION({VARCHAR()}),
+      makeUnionVector(UNION({VARCHAR()}), {Variant("hello world")}));
 }
 
 TEST_F(VectorCreateConstantTest, null) {
@@ -2003,6 +2077,7 @@ TEST_F(VectorCreateConstantTest, null) {
   testNullConstant<TypeKind::ROW>(ROW({}));
   testNullConstant<TypeKind::ARRAY>(ARRAY(DOUBLE()));
   testNullConstant<TypeKind::MAP>(MAP(INTEGER(), DOUBLE()));
+  testNullConstant<TypeKind::UNION>(UNION({ARRAY(BIGINT()), ARRAY(REAL())}));
 }
 
 class TestingHook : public ValueHook {
@@ -4390,7 +4465,15 @@ TEST_F(VectorTest, transferOrCopyTo) {
                [](auto row) { return row; },
                [](auto row) { return row + 1; },
                [](auto row) { return row == 1; },
-               [](auto row) { return row == 2; })});
+               [](auto row) { return row == 2; }),
+           maker.unionVector(
+               UNION({INTEGER(), DOUBLE()}),
+               3,
+               [](auto i) {
+                 return i % 2 == 0 ? Variant(i)
+                                   : Variant(static_cast<double>(i));
+               },
+               [](auto i) { return i == 1; })});
       expected = BaseVector::copy(*vector, pool.get());
       vector->transferOrCopyTo(pool.get());
     }

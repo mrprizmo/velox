@@ -57,7 +57,7 @@ constexpr column_index_t kConstantChannel =
 
 /// Velox type system supports a small set of SQL-compatible composeable types:
 /// BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, HUGEINT, REAL, DOUBLE, VARCHAR,
-/// VARBINARY, TIMESTAMP, ARRAY, MAP, ROW
+/// VARBINARY, TIMESTAMP, ARRAY, MAP, ROW, UNION
 ///
 /// This file has multiple C++ type definitions for each of these logical types.
 /// These logical definitions each serve slightly different purposes.
@@ -84,6 +84,7 @@ enum class TypeKind : int8_t {
   // Enum values for ComplexTypes start after 30 to leave
   // some values space to accommodate adding new scalar/native
   // types above.
+  UNION = 29,
   ARRAY = 30,
   MAP = 31,
   ROW = 32,
@@ -99,6 +100,7 @@ template <TypeKind KIND>
 class ScalarType;
 class ShortDecimalType;
 class LongDecimalType;
+class UnionType;
 class ArrayType;
 class MapType;
 class RowType;
@@ -273,6 +275,19 @@ struct TypeTraits<TypeKind::VARBINARY> {
 };
 
 template <>
+struct TypeTraits<TypeKind::UNION> {
+  using ImplType = UnionType;
+  using NativeType = void;
+  using DeepCopiedType = void;
+  static constexpr uint32_t minSubTypes = 1;
+  static constexpr uint32_t maxSubTypes = std::numeric_limits<uint8_t>::max();
+  static constexpr TypeKind typeKind = TypeKind::UNION;
+  static constexpr bool isPrimitiveType = false;
+  static constexpr bool isFixedWidth = false;
+  static constexpr const char* name = "UNION";
+};
+
+template <>
 struct TypeTraits<TypeKind::ARRAY> {
   using ImplType = ArrayType;
   using NativeType = void;
@@ -371,7 +386,7 @@ constexpr bool is_string_kind(TypeKind kind) {
 
 constexpr bool is_nested_kind(TypeKind kind) {
   return kind == TypeKind::ARRAY || kind == TypeKind::MAP ||
-      kind == TypeKind::ROW;
+      kind == TypeKind::ROW || kind == TypeKind::UNION;
 }
 
 template <TypeKind KIND>
@@ -592,7 +607,7 @@ class Type : public Tree<const TypePtr>, public velox::ISerializable {
   /// equivalent if the typeKind matches, but the typeIndex could be different.
   virtual bool equivalent(const Type& other) const = 0;
 
-  /// For Complex types (Row, Array, Map, Opaque): types are strongly matched.
+  /// For Complex types (Row, Array, Map, Union, Opaque): types are strongly matched.
   /// For primitive types: same as equivalent.
   virtual bool operator==(const Type& other) const {
     return this->equals(other);
@@ -635,6 +650,7 @@ class Type : public Tree<const TypePtr>, public velox::ISerializable {
   VELOX_FLUENT_CAST(Varchar, VARCHAR)
   VELOX_FLUENT_CAST(Varbinary, VARBINARY)
   VELOX_FLUENT_CAST(Timestamp, TIMESTAMP)
+  VELOX_FLUENT_CAST(Union, UNION)
   VELOX_FLUENT_CAST(Array, ARRAY)
   VELOX_FLUENT_CAST(Map, MAP)
   VELOX_FLUENT_CAST(Row, ROW)
@@ -667,7 +683,7 @@ class Type : public Tree<const TypePtr>, public velox::ISerializable {
     return typeid(*this) == typeid(other);
   }
 
-  /// For Complex types (Row, Array, Map, Opaque): types are strongly matched.
+  /// For Complex types (Row, Array, Map, Union, Opaque): types are strongly matched.
   /// Examples: Two RowTypes are == if the children types and the children names
   /// are same. Two OpaqueTypes are == if the typeKind and the typeIndex are
   /// same.
@@ -974,6 +990,78 @@ class UnknownType : public CanProvideCustomComparisonType<TypeKind::UNKNOWN> {
     return obj;
   }
 };
+
+class UnionType : public TypeBase<TypeKind::UNION> {
+ public:
+  /// @param types List of child types.
+  UnionType(std::vector<TypePtr>&& types);
+
+  ~UnionType() override;
+
+  uint32_t size() const final {
+    return children_.size();
+  }
+
+  const TypePtr& childAt(uint32_t idx) const final {
+    VELOX_CHECK_LT(idx, children_.size());
+    return children_[idx];
+  }
+
+  uint8_t typeIndex(const TypePtr& child) const {
+    auto childHash = child->hashKind();
+    for (uint32_t i = 0; i < children_.size(); ++i) {
+      if (childHash == children_[i]->hashKind() && child->kindEquals(children_[i])) {
+        return i;
+      }
+    }
+    VELOX_FAIL("Child type {} not found in {}", child->toString(), toString());
+  }
+
+  const std::vector<TypePtr>& children() const {
+    return children_;
+  }
+
+  /// Returns true if all child types are orderable.
+  bool isOrderable() const override;
+
+  /// Returns true if all child types are comparable.
+  bool isComparable() const override;
+
+  /// Returns true if the 'other' type is the same.
+  bool equivalent(const Type& other) const override;
+
+  std::string toString() const override;
+
+  folly::dynamic serialize() const override;
+
+  std::span<const TypeParameter> parameters() const override {
+    const auto* parameters = parameters_.load(std::memory_order_acquire);
+    if (parameters) [[likely]] {
+      return *parameters;
+    }
+    return *ensureParameters();
+  }
+
+  size_t hashKind() const override;
+
+ protected:
+  bool equals(const Type& other) const override;
+
+ private:
+  const std::vector<TypeParameter>* ensureParameters() const;
+
+  std::vector<TypePtr> children_;
+  
+  mutable std::atomic<std::vector<TypeParameter>*> parameters_{nullptr};
+  mutable std::atomic_bool hashKindComputed_{false};
+  mutable std::atomic_size_t hashKind_;
+};
+
+using UnionTypePtr = std::shared_ptr<const UnionType>;
+
+inline UnionTypePtr asUnionType(const TypePtr& type) {
+  return std::dynamic_pointer_cast<const UnionType>(type);
+}
 
 class ArrayType : public TypeBase<TypeKind::ARRAY> {
  public:
@@ -1665,6 +1753,13 @@ struct TypeFactory<TypeKind::UNKNOWN> {
 };
 
 template <>
+struct TypeFactory<TypeKind::UNION> {
+  static UnionTypePtr create(std::vector<TypePtr>&& types) {
+    return std::make_shared<const UnionType>(std::move(types));
+  }
+};
+
+template <>
 struct TypeFactory<TypeKind::ARRAY> {
   static ArrayTypePtr create(TypePtr elementType) {
     return std::make_shared<const ArrayType>(std::move(elementType));
@@ -1687,6 +1782,11 @@ struct TypeFactory<TypeKind::ROW> {
     return std::make_shared<const RowType>(std::move(names), std::move(types));
   }
 };
+
+/// Returns a union of 'types'
+///
+/// Example: UNION({BIGINT(), INTEGER(), VARCHAR()}).
+UnionTypePtr UNION(std::vector<TypePtr> types);
 
 /// Returns an array of 'elementType'.
 ///
@@ -1898,6 +1998,10 @@ std::shared_ptr<const OpaqueType> OPAQUE() {
         return TEMPLATE_FUNC<T, ::facebook::velox::TypeKind::TIMESTAMP>(      \
             __VA_ARGS__);                                                     \
       }                                                                       \
+      case ::facebook::velox::TypeKind::UNION: {                              \
+        return TEMPLATE_FUNC<T, ::facebook::velox::TypeKind::UNION>(          \
+            __VA_ARGS__);                                                     \
+      }                                                                       \
       case ::facebook::velox::TypeKind::MAP: {                                \
         return TEMPLATE_FUNC<T, ::facebook::velox::TypeKind::MAP>(            \
             __VA_ARGS__);                                                     \
@@ -1990,6 +2094,9 @@ std::shared_ptr<const OpaqueType> OPAQUE() {
         return PREFIX<::facebook::velox::TypeKind::TIMESTAMP> SUFFIX(          \
             __VA_ARGS__);                                                      \
       }                                                                        \
+      case ::facebook::velox::TypeKind::UNION: {                               \
+        return PREFIX<::facebook::velox::TypeKind::UNION> SUFFIX(__VA_ARGS__); \
+      }                                                                        \
       case ::facebook::velox::TypeKind::ARRAY: {                               \
         return PREFIX<::facebook::velox::TypeKind::ARRAY> SUFFIX(__VA_ARGS__); \
       }                                                                        \
@@ -2077,6 +2184,9 @@ std::shared_ptr<const OpaqueType> OPAQUE() {
       case ::facebook::velox::TypeKind::TIMESTAMP: {                 \
         return CLASS<::facebook::velox::TypeKind::TIMESTAMP>::FIELD; \
       }                                                              \
+      case ::facebook::velox::TypeKind::UNION: {                     \
+        return CLASS<::facebook::velox::TypeKind::UNION>::FIELD;     \
+      }                                                              \
       case ::facebook::velox::TypeKind::ARRAY: {                     \
         return CLASS<::facebook::velox::TypeKind::ARRAY>::FIELD;     \
       }                                                              \
@@ -2150,6 +2260,9 @@ TypePtr createType(std::vector<TypePtr>&& children) {
   static_assert(TypeTraits<KIND>::isPrimitiveType);
   return ScalarType<KIND>::create();
 }
+
+template <>
+TypePtr createType<TypeKind::UNION>(std::vector<TypePtr>&& children);
 
 template <>
 TypePtr createType<TypeKind::ROW>(std::vector<TypePtr>&& children);

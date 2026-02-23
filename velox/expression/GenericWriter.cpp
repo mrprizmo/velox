@@ -155,6 +155,22 @@ void copy_from_internal<TypeKind::MAP>(
 }
 
 template <>
+void copy_from_internal<TypeKind::UNION>(
+    GenericWriter& out,
+    const GenericView& in) {
+  auto dyanmicUnionView = in.castTo<DynamicUnion>();
+  auto& dynamicUnionWriter = out.castTo<DynamicUnion>();
+
+  auto unionValue = dyanmicUnionView.value();
+  if (unionValue.has_value()) {
+    dynamicUnionWriter.set_tag(dyanmicUnionView.index())
+        .copy_from(unionValue.value());
+  } else {
+    dynamicUnionWriter.set_null();
+  }
+}
+
+template <>
 void copy_from_internal<TypeKind::ROW>(
     GenericWriter& out,
     const GenericView& in) {

@@ -32,6 +32,7 @@ enum class Simple {
   DICTIONARY,
   FLAT,
   SEQUENCE,
+  UNION,
   ROW,
   MAP,
   FLAT_MAP,
@@ -54,6 +55,8 @@ inline std::ostream& operator<<(
       return out << "FLAT";
     case VectorEncoding::Simple::SEQUENCE:
       return out << "SEQUENCE";
+    case VectorEncoding::Simple::UNION:
+      return out << "UNION";
     case VectorEncoding::Simple::ROW:
       return out << "ROW";
     case VectorEncoding::Simple::MAP:

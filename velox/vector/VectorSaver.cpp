@@ -81,6 +81,7 @@ void writeEncoding(VectorEncoding::Simple encoding, std::ostream& out) {
     case VectorEncoding::Simple::ROW:
     case VectorEncoding::Simple::ARRAY:
     case VectorEncoding::Simple::MAP:
+    case VectorEncoding::Simple::UNION:
       write<int32_t>(static_cast<int8_t>(Encoding::kFlat), out);
       return;
     case VectorEncoding::Simple::CONSTANT:
@@ -546,6 +547,59 @@ VectorPtr readRowVector(
   return std::make_shared<RowVector>(pool, type, nulls, size, children);
 }
 
+void writeUnionVector(const BaseVector& vector, std::ostream& out) {
+  writeOptionalBuffer(vector.nulls(), out);
+
+  const auto* unionVector = vector.as<UnionVector>();
+  VELOX_CHECK_NOT_NULL(
+      unionVector, "Expected a UnionVector, got: {}", vector.toString());
+
+  writeBuffer(unionVector->tags(), out);
+
+  auto& children = unionVector->children();
+  auto numChildren = unionVector->childrenSize();
+  write<int32_t>(numChildren, out);
+
+  for (auto i = 0; i < numChildren; ++i) {
+    const auto& child = children[i];
+    write<bool>(child != nullptr, out);
+    if (child) {
+      saveVector(*child, out);
+    }
+  }
+}
+
+VectorPtr readUnionVector(
+    const TypePtr& type,
+    vector_size_t size,
+    std::istream& in,
+    memory::MemoryPool* pool) {
+  BufferPtr nulls = readOptionalBuffer(in, pool);
+  BufferPtr tags = readBuffer(in, pool);
+
+  auto numChildren = read<int32_t>(in);
+  std::vector<VectorPtr> children;
+  children.reserve(numChildren);
+  
+  for (auto i = 0; i < numChildren; ++i) {
+    bool present = read<bool>(in);
+    if (present) {
+      children.push_back(restoreVector(in, pool));
+    } else {
+      children.push_back(nullptr);
+    }
+  }
+
+  return std::make_shared<UnionVector>(
+    pool, 
+    type, 
+    std::move(nulls), 
+    size, 
+    std::move(children), 
+    std::move(tags)
+  );
+}
+
 void writeArrayVector(const BaseVector& vector, std::ostream& out) {
   // Nulls buffer.
   writeOptionalBuffer(vector.nulls(), out);
@@ -706,6 +760,9 @@ void saveVector(const BaseVector& vector, std::ostream& out) {
     case VectorEncoding::Simple::MAP:
       writeMapVector(vector, out);
       return;
+    case VectorEncoding::Simple::UNION:
+      writeUnionVector(vector, out);
+      return;
     case VectorEncoding::Simple::LAZY:
       writeLazyVector(vector, out);
       return;
@@ -747,6 +804,8 @@ VectorPtr restoreVector(std::istream& in, memory::MemoryPool* pool) {
         return readArrayVector(type, size, in, pool);
       } else if (type->isMap()) {
         return readMapVector(type, size, in, pool);
+      } else if (type->isUnion()) {
+        return readUnionVector(type, size, in, pool);
       }
       return readFlatVector(type, size, in, pool);
     case Encoding::kConstant:

@@ -40,6 +40,13 @@ struct CastTypeChecker<DynamicRow> {
   }
 };
 
+template <>
+struct CastTypeChecker<DynamicUnion> {
+  static bool check(const TypePtr& vectorType) {
+    return TypeKind::UNION == vectorType->kind();
+  }
+};
+
 template <typename T>
 struct CastTypeChecker<Generic<T>> {
   static bool check(const TypePtr&) {

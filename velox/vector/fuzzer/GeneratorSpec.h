@@ -134,6 +134,67 @@ class RowGeneratorSpec : public GeneratorSpec {
 };
 
 template <typename Distribution>
+class UnionGeneratorSpec : public GeneratorSpec {
+ public:
+  UnionGeneratorSpec(
+      TypePtr type,
+      std::vector<GeneratorSpecPtr>&& generatorSpecVector,
+      Distribution&& tagDistribution,
+      double nullProbability)
+      : GeneratorSpec(type, nullProbability),
+        children_(std::move(generatorSpecVector)),
+        tagDistribution_(std::forward<Distribution>(tagDistribution)) {
+    using Ret = std::invoke_result_t<Distribution, FuzzerGenerator&>;
+    static_assert(std::is_convertible_v<Ret, vector_size_t>);
+  }
+
+  ~UnionGeneratorSpec() override {}
+
+ protected:
+  VectorPtr generateDataImpl(
+      FuzzerGenerator& rng,
+      memory::MemoryPool* pool,
+      size_t vectorSize) const override {
+    auto offsets = allocateOffsets(vectorSize, pool);
+    auto rawOffsets = offsets->asMutable<vector_size_t>();
+    auto tags = allocateTags(vectorSize, pool);
+    auto rawTags = tags->asMutable<vector_size_t>();
+
+    size_t numChildren = children_.size();
+    std::vector<vector_size_t> childNextOffsets(numChildren, 0);
+
+    // Randomly creates tags.
+    for (auto i = 0; i < vectorSize; ++i) {
+      uint8_t tag = tagDistribution_(rng) % numChildren;
+      rawTags[i] = tag;
+      rawOffsets[i] = childNextOffsets[tag]++;
+    }
+
+    std::vector<VectorPtr> genChildren(numChildren, nullptr);
+
+    for (auto i = 0; i < numChildren; ++i) {
+      if (childNextOffsets[i] > 0) {
+        genChildren[i] =
+            children_[i]->generateData(rng, pool, childNextOffsets[i]);
+      }
+    }
+
+    return std::make_shared<UnionVector>(
+        pool,
+        type_,
+        nullptr,
+        vectorSize,
+        std::move(tags),
+        std::move(offsets),
+        std::move(genChildren));
+  }
+
+ private:
+  std::vector<GeneratorSpecPtr> children_;
+  Distribution tagDistribution_;
+};
+
+template <typename Distribution>
 class ArrayGeneratorSpec : public GeneratorSpec {
  public:
   ArrayGeneratorSpec(
@@ -360,6 +421,24 @@ inline GeneratorSpecPtr RANDOM_ARRAY(
   return std::make_shared<const ArrayGeneratorSpec<Distribution>>(
       arrayType,
       generatorSpec,
+      std::forward<Distribution>(distribution),
+      nullProbability);
+}
+
+template <typename Distribution>
+inline GeneratorSpecPtr RANDOM_UNION(
+    std::vector<GeneratorSpecPtr>&& generatorSpecVector,
+    Distribution&& distribution,
+    double nullProbability = 0.0) {
+  std::vector<TypePtr> types;
+  types.reserve(generatorSpecVector.size());
+  for (const auto& generatorSpec : generatorSpecVector) {
+    types.push_back(generatorSpec->type());
+  }
+  auto unionType = UNION(std::move(types));
+  return std::make_shared<const UnionGeneratorSpec<Distribution>>(
+      unionType,
+      std::move(generatorSpecVector),
       std::forward<Distribution>(distribution),
       nullProbability);
 }

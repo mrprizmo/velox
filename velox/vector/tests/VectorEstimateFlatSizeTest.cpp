@@ -534,3 +534,44 @@ TEST_F(VectorEstimateFlatSizeTest, structs) {
   EXPECT_EQ(2837, row->estimateFlatSize());
   EXPECT_EQ(3295, flatten(row)->estimateFlatSize());
 }
+
+TEST_F(VectorEstimateFlatSizeTest, unions) {
+  auto unionType = UNION({INTEGER(), DOUBLE()});
+  const vector_size_t size = 1000;
+
+  auto unionVector = makeUnionVector(unionType, size, [](auto i) {
+    return i % 2 ? Variant(static_cast<double>(i)) : Variant(i);
+  });
+
+  EXPECT_EQ(12416, unionVector->retainedSize());
+  EXPECT_EQ(11976, unionVector->estimateFlatSize());
+
+  vector_size_t dictSize = 100;
+  auto indices = makeIndices(dictSize, [](auto row) { return row * 2; });
+  auto dict = wrapInDictionary(indices, dictSize, unionVector);
+
+  EXPECT_EQ(12832, dict->retainedSize());
+  EXPECT_EQ(1241, dict->estimateFlatSize());
+  EXPECT_EQ(992, flatten(dict)->retainedSize());
+
+  std::vector<VectorPtr> children = unionVector->children();
+  for (size_t i = 0; i < children.size(); ++i) {
+    if (children[i]) {
+      auto childSize = children[i]->size();
+      auto childIndices = makeIndices(childSize, [](auto j) { return j; });
+      children[i] = wrapInDictionary(childIndices, childSize, children[i]);
+    }
+  }
+
+  auto flatUnionWithDictFields = std::make_shared<UnionVector>(
+      pool(),
+      unionType,
+      nullptr,
+      size,
+      children,
+      unionVector->tags(),
+      unionVector->offsets());
+
+  EXPECT_EQ(18368, flatUnionWithDictFields->retainedSize());
+  EXPECT_EQ(11976, flatUnionWithDictFields->estimateFlatSize());
+}

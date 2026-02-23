@@ -67,5 +67,8 @@ void writeOne<TypeKind::MAP>(const variant& v, exec::GenericWriter& writer);
 
 template <>
 void writeOne<TypeKind::ROW>(const variant& v, exec::GenericWriter& writer);
+
+template <>
+void writeOne<TypeKind::UNION>(const variant& v, exec::GenericWriter& writer);
 } // namespace fuzzer
 } // namespace facebook::velox

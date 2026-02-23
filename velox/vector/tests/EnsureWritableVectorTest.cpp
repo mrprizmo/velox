@@ -866,6 +866,97 @@ TEST_F(EnsureWritableVectorTest, flatMap) {
   test::assertEqualVectors(shallowCopy, flatMap, evenRows);
 }
 
+TEST_F(EnsureWritableVectorTest, unionVector) {
+  vector_size_t size = 1'000;
+  auto unionType = UNION({INTEGER(), BIGINT()});
+
+  // Create union vector 'a' with INTEGER values for even rows and BIGINT
+  // values for odd rows.
+  auto a = makeUnionVector(
+      unionType,
+      size,
+      /*valueAt*/
+      [&](vector_size_t row) -> Variant {
+        if (row % 2 == 0) {
+          return Variant::create<TypeKind::INTEGER>(row);
+        } else {
+          return Variant::create<TypeKind::BIGINT>(row * 2);
+        }
+      },
+      /*isNullAt*/ test::VectorMaker::nullEvery(7));
+
+  // Create union vector 'b' with similar structure but different values.
+  auto b = makeUnionVector(
+      unionType,
+      size,
+      /*valueAt*/
+      [&](vector_size_t row) -> Variant {
+        if (row % 3 == 0) {
+          return Variant::create<TypeKind::INTEGER>(row * 10);
+        } else {
+          return Variant::create<TypeKind::BIGINT>(row * 3);
+        }
+      },
+      /*isNullAt*/ test::VectorMaker::nullEvery(11));
+
+  SelectivityVector rows(size);
+  VectorPtr result;
+  BaseVector::ensureWritable(rows, unionType, pool(), result);
+  ASSERT_EQ(size, result->size());
+  ASSERT_TRUE(unionType->kindEquals(result->type()));
+  ASSERT_EQ(VectorEncoding::Simple::UNION, result->encoding());
+
+  result->copy(a.get(), rows, nullptr);
+
+  // Multiply-referenced vector.
+  auto resultCopy = result;
+  ASSERT_FALSE(result.use_count() == 1);
+
+  auto oddRows = selectOddRows(size);
+  BaseVector::ensureWritable(oddRows, result->type(), pool(), result);
+  ASSERT_TRUE(result.use_count() == 1);
+  ASSERT_NE(resultCopy.get(), result.get());
+
+  // Verify that even rows were copied over.
+  for (vector_size_t i = 0; i < size; i += 2) {
+    ASSERT_TRUE(a->equalValueAt(result.get(), i, i));
+  }
+
+  // Modify odd rows and verify that resultCopy is not affected.
+  result->copy(b.get(), oddRows, nullptr);
+
+  for (vector_size_t i = 0; i < size; i++) {
+    auto expected = i % 2 == 0 ? a : b;
+    ASSERT_TRUE(expected->equalValueAt(result.get(), i, i));
+
+    ASSERT_TRUE(a->equalValueAt(resultCopy.get(), i, i));
+  }
+
+  // Singly referenced union vector; multiply-referenced children vectors.
+  result = BaseVector::create(result->type(), rows.size(), pool());
+  result->copy(a.get(), rows, nullptr);
+
+  auto unionResult = result->as<UnionVector>();
+  // Get first child to verify it's copied on write.
+  auto firstChildCopy = unionResult->childAt(0);
+  auto secondChildCopy = unionResult->childAt(1);
+
+  BaseVector::ensureWritable(oddRows, unionType, pool(), result);
+
+  // Verify that even rows were copied over.
+  for (vector_size_t i = 0; i < size; i += 2) {
+    ASSERT_TRUE(a->equalValueAt(result.get(), i, i)) << "at " << i;
+  }
+
+  result->copy(b.get(), oddRows, nullptr);
+
+  // Verify that children are not modified if they were not referenced.
+  for (vector_size_t i = 0; i < size; i++) {
+    UnionVectorPtr expected = (i % 2 == 0) ? a : b;
+    ASSERT_TRUE(expected->equalValueAt(result.get(), i, i)) << "at " << i;
+  }
+}
+
 TEST_F(EnsureWritableVectorTest, allNullArray) {
   vector_size_t size = 1'000;
   auto a = makeArrayVector<int64_t>(

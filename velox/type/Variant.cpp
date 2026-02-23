@@ -68,6 +68,21 @@ struct VariantEquality<TypeKind::TIMESTAMP> {
   }
 };
 
+// union
+template <>
+struct VariantEquality<TypeKind::UNION> {
+  template <bool NullEqualsNull>
+  static bool equals(const Variant& a, const Variant& b) {
+    if (a.isNull() || b.isNull()) {
+      return evaluateNullEquality<NullEqualsNull>(a, b);
+    }
+    auto& aUnion = a.value<TypeKind::UNION>();
+    auto& bUnion = b.value<TypeKind::UNION>();
+
+    return dispatchDynamicVariantEquality(aUnion, bUnion, NullEqualsNull);
+  }
+};
+
 // array
 template <>
 struct VariantEquality<TypeKind::ARRAY> {
@@ -245,6 +260,7 @@ std::string Variant::toString(const TypePtr& type) const {
       auto& timestamp = value<TypeKind::TIMESTAMP>();
       return timestamp.toString();
     }
+    case TypeKind::UNION:
     case TypeKind::ARRAY:
     case TypeKind::MAP:
     case TypeKind::ROW:
@@ -274,6 +290,17 @@ std::string toStringAsVectorNoNull<TypeKind::OPAQUE>(
     const TypePtr& type,
     const Variant& value) {
   return "<opaque>";
+}
+
+template <>
+std::string toStringAsVectorNoNull<TypeKind::UNION>(
+    const TypePtr& type,
+    const Variant& value) {
+  auto& unionValue = value.value<TypeKind::UNION>();
+  auto inferType = unionValue.inferType();
+
+  auto childTag = type->asUnion().typeIndex(inferType);
+  return toStringAsVectorImpl(type->childAt(childTag), unionValue);
 }
 
 template <>
@@ -414,6 +441,16 @@ std::string Variant::toJson(const Type& type) const {
       b += "]";
       return b;
     }
+    case TypeKind::UNION: {
+      auto& unionValue = value<TypeKind::UNION>();
+      auto inferType = unionValue.inferType();
+
+      auto childTag = type.asUnion().typeIndex(inferType);
+      return fmt::format(
+          R"({{"tag":"{}","value":{}}})",
+          childTag,
+          unionValue.toJson(type.childAt(childTag)));
+    }
     case TypeKind::VARBINARY: {
       auto& str = value<TypeKind::VARBINARY>();
       auto encoded = encoding::Base64::encode(str);
@@ -541,6 +578,14 @@ std::string Variant::toJsonUnsafe(const TypePtr& type) const {
       b += "]";
       return b;
     }
+    case TypeKind::UNION: {
+      auto& unionValue = value<TypeKind::UNION>();
+      auto inferType = unionValue.inferType();
+
+      auto childTag = type->asUnion().typeIndex(inferType);
+      return fmt::format(
+          R"({{"tag":"{}","value":{}}})", childTag, unionValue.toJsonUnsafe());
+    }
     case TypeKind::VARBINARY: {
       auto& str = value<TypeKind::VARBINARY>();
       auto encoded = encoding::Base64::encode(str);
@@ -659,6 +704,11 @@ folly::dynamic Variant::serialize() const {
       objValue = std::move(arr);
       break;
     }
+    case TypeKind::UNION: {
+      auto& unionValue = value<TypeKind::UNION>();
+      objValue = unionValue.serialize();
+      break;
+    }
     case TypeKind::VARBINARY: {
       auto& str = value<TypeKind::VARBINARY>();
       objValue = encoding::Base64::encode(str);
@@ -771,7 +821,9 @@ Variant Variant::create(const folly::dynamic& variantobj) {
       return kind == TypeKind::ARRAY ? Variant::array(values)
                                      : Variant::row(values);
     }
-
+    case TypeKind::UNION: {
+      return Variant::unionVariant(Variant::create(obj));
+    }
     case TypeKind::VARBINARY: {
       auto str = obj.asString();
       auto result = encoding::Base64::decode(str);
@@ -923,6 +975,12 @@ uint64_t Variant::hash<TypeKind::ROW>() const {
     hash = (i == 0 ? childHash : bits::hashMix(hash, childHash));
   }
   return hash;
+}
+
+template <>
+uint64_t Variant::hash<TypeKind::UNION>() const {
+  const auto& unionValue = value<TypeKind::UNION>();
+  return bits::hashMix(bits::kNullHash, unionValue.hash());
 }
 
 template <>
@@ -1079,6 +1137,11 @@ bool Variant::equalsWithEpsilon(const Variant& other) const {
       return compareComplexTypeWithEpsilon<TypeKind::MAP>(*this, other);
     case TypeKind::ROW:
       return compareComplexTypeWithEpsilon<TypeKind::ROW>(*this, other);
+    case TypeKind::UNION: {
+      const auto& leftUnion = value<TypeKind::UNION>();
+      const auto& rightUnion = other.value<TypeKind::UNION>();
+      return leftUnion.equalsWithEpsilon(rightUnion);
+    }
     default:
       return VELOX_DYNAMIC_TYPE_DISPATCH_ALL(equals, kind_, other);
   }
@@ -1156,6 +1219,13 @@ TypePtr Variant::inferType() const {
         }
       }
       return ARRAY(std::move(elementType));
+    }
+    case TypeKind::UNION: {
+      if (isNull()) {
+        return UNION({UNKNOWN()});
+      }
+      const auto& unionValue = value<TypeKind::UNION>();
+      return UNION({unionValue.inferType()});
     }
     case TypeKind::OPAQUE: {
       if (isNull()) {
@@ -1236,6 +1306,20 @@ bool Variant::isTypeCompatible(const TypePtr& type) const {
       }
 
       return true;
+    }
+    case TypeKind::UNION: {
+      if (isNull()) {
+        return true;
+      }
+
+      const auto& unionValue = value<TypeKind::UNION>();
+
+      for (size_t i = 0; i < type->size(); ++i) {
+        if (unionValue.isTypeCompatible(type->childAt(i))) {
+          return true;
+        }
+      }
+      return false;
     }
     default:
       return true;

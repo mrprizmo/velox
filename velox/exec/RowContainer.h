@@ -1609,6 +1609,29 @@ inline void RowContainer::storeNoNulls<TypeKind::ROW>(
 }
 
 template <>
+inline void RowContainer::storeWithNulls<TypeKind::UNION>(
+    const DecodedVector& decoded,
+    vector_size_t rowIndex,
+    bool isKey,
+    char* row,
+    int32_t offset,
+    int32_t nullByte,
+    uint8_t nullMask,
+    int32_t columnIndex) { // ?
+  VELOX_NYI();
+}
+
+template <>
+inline void RowContainer::storeNoNulls<TypeKind::UNION>(
+    const DecodedVector& decoded,
+    vector_size_t rowIndex,
+    bool isKey,
+    char* row,
+    int32_t offset) {
+  VELOX_NYI();
+}
+
+template <>
 inline void RowContainer::storeWithNulls<TypeKind::ARRAY>(
     const DecodedVector& decoded,
     vector_size_t rowIndex,

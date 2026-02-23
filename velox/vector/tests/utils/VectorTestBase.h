@@ -176,6 +176,34 @@ class VectorTestBase {
   /// @return 'n' vectors
   std::vector<RowVectorPtr> split(const RowVectorPtr& vector, int32_t n = 2);
 
+  UnionVectorPtr makeUnionVector(
+      const TypePtr& type,
+      vector_size_t size,
+      std::function<Variant(vector_size_t /*row*/)> valueAt,
+      std::function<bool(vector_size_t /*row*/)> isNullAt = nullptr) {
+    return vectorMaker_.unionVector(type, size, valueAt, isNullAt);
+  }
+
+  UnionVectorPtr makeUnionVector(
+      const TypePtr& type,
+      const std::vector<Variant>& data) {
+    return vectorMaker_.unionVector(type, data.size(), [&data](vector_size_t row){
+      return data[row];
+    });
+  }
+
+  UnionVectorPtr makeUnionVector(
+      const UnionTypePtr& type,
+      const VectorFuzzer::Options& fuzzerOpts) {
+    VectorFuzzer fuzzer(fuzzerOpts, pool());
+    return fuzzer.fuzzUnion(type);
+  }
+
+  RowVectorPtr makeUnionVector(
+      const std::vector<std::string>& childNames,
+      const std::vector<VectorPtr>& children,
+      std::function<bool(vector_size_t /*row*/)> isNullAt = nullptr);
+
   /// Returns a one element ArrayVector with 'elements' as elements of array at
   /// 0.
   VectorPtr asArray(VectorPtr elements);
@@ -704,6 +732,13 @@ class VectorTestBase {
       Variant value,
       vector_size_t size) {
     return vectorMaker_.constantRow(rowType, value, size);
+  }
+
+  VectorPtr makeConstantUnion(
+      const UnionTypePtr& unionType,
+      const Variant& value,
+      vector_size_t size) {
+    return vectorMaker_.constantUnion(unionType, value, size);
   }
 
   /// Create constant vector of type ARRAY from a std::vector.

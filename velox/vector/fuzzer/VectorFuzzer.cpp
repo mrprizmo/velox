@@ -18,6 +18,7 @@
 
 #include <boost/random/uniform_int_distribution.hpp>
 #include <fmt/format.h>
+#include <algorithm>
 #include <codecvt>
 #include <locale>
 
@@ -489,6 +490,21 @@ VectorPtr VectorFuzzer::fuzzFlat(
     }
 
     return fuzzRow(std::move(childrenVectors), rowType.names(), size);
+  } else if (type->isUnion()) {
+    const auto& unionType = type->asUnion();
+    std::vector<VectorPtr> childrenVectors;
+    auto numChildren = unionType.size();
+    childrenVectors.reserve(numChildren);
+    auto subSizes = randomPartition(size, numChildren);
+
+    for (auto i = 0; i < numChildren; ++i) {
+      auto& childType = type->childAt(i);
+      childrenVectors.emplace_back(
+          opts_.containerHasNulls ? fuzzFlat(childType, subSizes[i])
+                                  : fuzzFlatNotNull(childType, subSizes[i]));
+    }
+
+    return fuzzUnion(std::move(childrenVectors));
   } else if (type->isOpaque()) {
     return fuzzFlatOpaque(type, size);
   } else {
@@ -590,7 +606,9 @@ VectorPtr VectorFuzzer::fuzzComplex(const TypePtr& type, vector_size_t size) {
         return fuzzMap(keys, values, size);
       }
     }
-
+    case TypeKind::UNION: {
+      return fuzzUnion(std::dynamic_pointer_cast<const UnionType>(type), size);
+    }
     default:
       VELOX_UNREACHABLE("Unexpected type: {}", type->toString());
   }
@@ -648,6 +666,7 @@ void VectorFuzzer::fuzzOffsetsAndSizes(
   auto rawOffsets = offsets->asMutable<vector_size_t>();
   auto rawSizes = sizes->asMutable<vector_size_t>();
 
+  VELOX_CHECK(size != 0, "Fuzzing empty Array");
   size_t containerAvgLength = std::max(elementsSize / size, 1UL);
   size_t childSize = 0;
   size_t length = 0;
@@ -867,6 +886,152 @@ RowVectorPtr VectorFuzzer::fuzzRow(
       std::move(children));
 }
 
+void VectorFuzzer::fuzzOffsetsAndTags(
+    BufferPtr& offsets,
+    BufferPtr& tags,
+    const std::vector<vector_size_t>& subSizes) {
+  vector_size_t size = 0;
+
+  auto numChildren = subSizes.size();
+  for (auto i = 0; i < numChildren; ++i) {
+    size += subSizes[i];
+  }
+
+  offsets = allocateOffsets(size, pool_);
+  tags = allocateTags(size, pool_);
+  auto rawOffsets = offsets->asMutable<vector_size_t>();
+  auto rawTags = tags->asMutable<uint8_t>();
+
+  auto curIdx = 0;
+  for (auto i = 0; i < numChildren; ++i) {
+    std::fill(rawTags + curIdx, rawTags + curIdx + subSizes[i], i);
+    curIdx += subSizes[i];
+  }
+
+  std::shuffle(rawTags, rawTags + size, rng_);
+
+  std::vector<vector_size_t> childNextOffsets(numChildren, 0);
+  for (auto i = 0; i < size; ++i) {
+    rawOffsets[i] = childNextOffsets[rawTags[i]]++;
+  }
+}
+
+std::vector<vector_size_t> VectorFuzzer::randomPartition(
+    vector_size_t size,
+    size_t k) {
+  std::vector<vector_size_t> result;
+  result.reserve(k);
+  if (k == 0) {
+    return result;
+  }
+  if (k == 1) {
+    result.push_back(size);
+    return result;
+  }
+
+  std::vector<vector_size_t> cuts;
+  cuts.reserve(k - 1);
+
+  for (auto i = 0; i < k - 1; ++i) {
+    cuts.push_back(rand(rng_, 0, size));
+  }
+
+  std::ranges::sort(cuts);
+
+  vector_size_t prev = 0;
+  for (int cut : cuts) {
+    result.push_back(cut - prev);
+    prev = cut;
+  }
+  result.push_back(size - prev);
+
+  return result;
+}
+
+UnionVectorPtr VectorFuzzer::fuzzUnion(
+    const UnionTypePtr& unionType,
+    vector_size_t size,
+    bool allowTopLevelNulls,
+    const std::vector<AbstractInputGeneratorPtr>& inputGenerators) {
+  const vector_size_t numChildren = unionType->size();
+  std::vector<VectorPtr> children;
+  children.reserve(numChildren);
+
+  std::vector<vector_size_t> subSizes =
+      VectorFuzzer::randomPartition(size, numChildren);
+  BufferPtr offsets;
+  BufferPtr tags;
+  fuzzOffsetsAndTags(offsets, tags, subSizes);
+
+  const AbstractInputGeneratorPtr kNoInputGenerator{nullptr};
+  for (auto i = 0; i < unionType->size(); ++i) {
+    if (subSizes[i] == 0) {
+      children.push_back(nullptr);
+      continue;
+    }
+    const auto& inputGenerator =
+        inputGenerators.size() > i ? inputGenerators[i] : kNoInputGenerator;
+    children.push_back(
+        opts_.containerHasNulls
+            ? fuzz(unionType->childAt(i), subSizes[i], inputGenerator)
+            : fuzzNotNull(unionType->childAt(i), subSizes[i], inputGenerator));
+  }
+
+  return std::make_shared<UnionVector>(
+      pool_,
+      unionType,
+      allowTopLevelNulls ? fuzzNulls(size) : nullptr,
+      size,
+      std::move(children),
+      tags,
+      offsets);
+}
+
+UnionVectorPtr VectorFuzzer::fuzzUnion(
+    const UnionTypePtr& unionType,
+    std::vector<VectorPtr>&& children,
+    bool allowTopLevelNulls) {
+  const vector_size_t numChildren = unionType->size();
+  std::vector<vector_size_t> subSizes;
+  subSizes.reserve(numChildren);
+
+  vector_size_t size = 0;
+  for (auto& child : children) {
+    size += child->size();
+    subSizes.push_back(child->size());
+  }
+
+  BufferPtr offsets;
+  BufferPtr tags;
+  fuzzOffsetsAndTags(offsets, tags, subSizes);
+
+  return std::make_shared<UnionVector>(
+      pool_,
+      unionType,
+      allowTopLevelNulls ? fuzzNulls(size) : nullptr,
+      size,
+      std::move(children),
+      tags,
+      offsets);
+}
+
+UnionVectorPtr VectorFuzzer::fuzzUnion(const UnionTypePtr& unionType) {
+  ScopedOptions restorer(this);
+  opts_.allowLazyVector = false;
+  return fuzzUnion(unionType, opts_.vectorSize);
+}
+
+UnionVectorPtr VectorFuzzer::fuzzUnion(std::vector<VectorPtr>&& children) {
+  std::vector<TypePtr> types;
+  types.reserve(children.size());
+
+  for (const auto& child : children) {
+    types.emplace_back(child->type());
+  }
+
+  return fuzzUnion(UNION(std::move(types)), std::move(children));
+}
+
 BufferPtr VectorFuzzer::fuzzNulls(vector_size_t size) {
   NullsBuilder builder{size, pool_};
 
@@ -1021,6 +1186,22 @@ TypePtr VectorFuzzer::randRowTypeByWidth(
 
 TypePtr VectorFuzzer::randRowTypeByWidth(int minWidth) {
   return velox::randRowTypeByWidth(rng_, defaultScalarTypes(), minWidth);
+}
+
+UnionTypePtr VectorFuzzer::randUnionType(int maxDepth) {
+  return velox::randUnionType(rng_, maxDepth);
+}
+
+UnionTypePtr VectorFuzzer::randUnionType(
+    const std::vector<TypePtr>& scalarTypes,
+    int maxDepth) {
+  return velox::randUnionType(rng_, scalarTypes, maxDepth);
+}
+
+TypePtr VectorFuzzer::randUnionTypeByWidth(
+    const std::vector<TypePtr>& scalarTypes,
+    int minWidth) {
+  return velox::randUnionTypeByWidth(rng_, scalarTypes, minWidth);
 }
 
 size_t VectorFuzzer::randInRange(size_t min, size_t max) {
@@ -1256,7 +1437,7 @@ TypePtr randTypeByWidth(
     return scalarTypes[rand<uint32_t>(rng) % numScalarTypes];
   }
 
-  switch (rand<uint32_t>(rng) % 3) {
+  switch (rand<uint32_t>(rng) % 4) {
     case 0:
       return ARRAY(randTypeByWidth(rng, scalarTypes, minWidth - 1));
     case 1: {
@@ -1266,7 +1447,10 @@ TypePtr randTypeByWidth(
           randTypeByWidth(rng, scalarTypes, keyWidth),
           randTypeByWidth(rng, scalarTypes, minWidth - keyWidth - 1));
     }
-    // case 2:
+    case 2: {
+      return randUnionTypeByWidth(rng, scalarTypes, minWidth - 1);
+    }
+    // case 3:
     default:
       return randRowTypeByWidth(rng, scalarTypes, minWidth);
   }
@@ -1289,6 +1473,51 @@ TypePtr randRowTypeByWidth(
   return ROW(std::move(fields));
 }
 
+namespace {
+TypePtr randTypeExceptUnionByWidth(
+    FuzzerGenerator& rng,
+    const std::vector<TypePtr>& scalarTypes,
+    int minWidth) {
+  if (minWidth <= 1) {
+    const int numScalarTypes = scalarTypes.size();
+    return scalarTypes[rand<uint32_t>(rng) % numScalarTypes];
+  }
+
+  switch (rand<uint32_t>(rng) % 3) {
+    case 0:
+      return ARRAY(randTypeByWidth(rng, scalarTypes, minWidth - 1));
+    case 1: {
+      const auto keyWidth =
+          minWidth == 2 ? 1 : rand<uint32_t>(rng) % (minWidth - 2);
+      return MAP(
+          randTypeByWidth(rng, scalarTypes, keyWidth),
+          randTypeByWidth(rng, scalarTypes, minWidth - keyWidth - 1));
+    }
+    // case 2:
+    default:
+      return randRowTypeByWidth(rng, scalarTypes, minWidth);
+  }
+}
+} // namespace
+
+TypePtr randUnionTypeByWidth(
+    FuzzerGenerator& rng,
+    const std::vector<TypePtr>& scalarTypes,
+    int minWidth) {
+  const auto numFields = 1 + rand<uint32_t>(rng) % 10;
+  std::vector<TypePtr> fields;
+  auto remainingWidth = minWidth;
+  for (auto i = 1; i < numFields; ++i) {
+    const auto fieldWidth =
+        remainingWidth > 0 ? rand<uint32_t>(rng) % remainingWidth : 0;
+    fields.push_back(randTypeExceptUnionByWidth(rng, scalarTypes, fieldWidth));
+    remainingWidth -= fieldWidth;
+  }
+  fields.push_back(
+      randTypeExceptUnionByWidth(rng, scalarTypes, remainingWidth));
+  return UNION(std::move(fields));
+}
+
 TypePtr randOrderableType(FuzzerGenerator& rng, int maxDepth) {
   return randOrderableType(rng, defaultScalarTypes(), maxDepth);
 }
@@ -1308,12 +1537,27 @@ TypePtr randOrderableType(
   }
 
   auto numFields = 1 + rand<uint32_t>(rng) % 7;
-  std::vector<std::string> names;
   std::vector<TypePtr> fields;
+
+  // ROW or UNION?
+  if (rand<bool>(rng)) {
+    fields.push_back(randType(rng, scalarTypes, 0));
+    for (int i = 1; i < numFields; ++i) {
+      auto subType = randOrderableType(rng, scalarTypes, maxDepth - 1);
+      if (subType->kind() != TypeKind::UNION) {
+        fields.push_back(std::move(subType));
+      }
+    }
+
+    return UNION(std::move(fields));
+  }
+
+  std::vector<std::string> names;
   for (int i = 0; i < numFields; ++i) {
     names.push_back(fmt::format("f{}", i));
     fields.push_back(randOrderableType(rng, scalarTypes, maxDepth - 1));
   }
+
   return ROW(std::move(names), std::move(fields));
 }
 
@@ -1326,6 +1570,17 @@ RowTypePtr randRowType(
     const std::vector<TypePtr>& scalarTypes,
     int maxDepth) {
   return fuzzer::randRowType(rng, scalarTypes, maxDepth);
+}
+
+UnionTypePtr randUnionType(FuzzerGenerator& rng, int maxDepth) {
+  return randUnionType(rng, defaultScalarTypes(), maxDepth);
+}
+
+UnionTypePtr randUnionType(
+    FuzzerGenerator& rng,
+    const std::vector<TypePtr>& scalarTypes,
+    int maxDepth) {
+  return fuzzer::randUnionType(rng, scalarTypes, maxDepth);
 }
 
 } // namespace facebook::velox

@@ -34,8 +34,8 @@ namespace facebook::velox {
 ///
 /// A Variant encapsulates a value along with its TypeKind, supporting all Velox
 /// types including scalars (INTEGER, VARCHAR, DOUBLE, etc.), complex types
-/// (ARRAY, MAP, ROW), and special types (TIMESTAMP, OPAQUE). Variants can also
-/// represent null values of any type.
+/// (UNION, ARRAY, MAP, ROW), and special types (TIMESTAMP, OPAQUE). Variants
+/// can also represent null values of any type.
 ///
 /// Note that Variants only store the physical type of a variable (the
 /// TypeKind), and not its logical type (TypePtr). Variants also do not store
@@ -59,6 +59,7 @@ namespace facebook::velox {
 ///   TypeKind)
 /// - MAP: Key-value mapping of Variants
 /// - ROW: Heterogeneous tuple of Variants
+/// - UNION: Variant wrapper
 ///
 /// Special types:
 /// - OPAQUE: Type-erased wrapper for custom C++ objects
@@ -69,7 +70,7 @@ namespace facebook::velox {
 /// - Implicit constructors from native types: `Variant(42)`, `Variant("hello")`
 /// - Explicit factory methods: `Variant::create<KIND>(value)`
 /// - Type-specific factories: `Variant::array()`, `Variant::map()`,
-///   `Variant::row()`
+///   `Variant::row()`, `Variant::unionVariant()`
 /// - Null values: `Variant::null(TypeKind)` or `Variant(TypeKind)`
 /// - Deserialization: `Variant::create(folly::dynamic)`
 ///
@@ -94,6 +95,7 @@ namespace facebook::velox {
 /// Variant arr = Variant::array({Variant(1), Variant(2), Variant(3)});
 /// Variant map = Variant::map({{Variant("key"), Variant("value")}});
 /// Variant row = Variant::row({Variant(1), Variant("test"), Variant(3.14)});
+/// Variant union = Variant::unionVariant(Variant("test"));
 ///
 /// // Accessing values
 /// int32_t i = intVar.value<TypeKind::INTEGER>();
@@ -144,6 +146,13 @@ struct VariantTypeTraits<
   using stored_type =
       TypeStorage<scalar_stored_type<KIND>, KIND, usesCustomComparison>;
   using value_type = scalar_stored_type<KIND>;
+};
+
+template <bool usesCustomComparison>
+struct VariantTypeTraits<TypeKind::UNION, usesCustomComparison> {
+  using stored_type =
+      TypeStorage<Variant, TypeKind::UNION, usesCustomComparison>;
+  using value_type = Variant;
 };
 
 template <TypeKind KIND, bool usesCustomComparison>
@@ -312,6 +321,7 @@ class Variant {
   ///          - VARCHAR/VARBINARY: std::string
   ///          - ARRAY/ROW: std::vector<Variant>
   ///          - MAP: std::map<Variant, Variant>
+  ///          - UNION: Variant
   ///          - TIMESTAMP: Timestamp
   ///          - OPAQUE: OpaqueCapsule
   ///          The parameter is passed by value and moved into the Variant.
@@ -401,7 +411,8 @@ class Variant {
   /// @param obj A folly::dynamic object containing the serialized Variant data.
   ///            The object must have the following structure:
   ///            - "type": A string field specifying the TypeKind name (e.g.,
-  ///              "INTEGER", "VARCHAR", "ARRAY", "MAP", "ROW", "TIMESTAMP")
+  ///              "INTEGER", "VARCHAR", "UNION", "ARRAY", "MAP", "ROW",
+  ///              "TIMESTAMP")
   ///            - "value": The actual value, whose format depends on the type:
   ///
   ///              Scalar types (BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT,
@@ -410,6 +421,9 @@ class Variant {
   ///
   ///              VARBINARY:
   ///                Base64-encoded string representation of binary data
+  ///
+  ///              UNION:
+  ///                folly::dynamic object representing the contained Variant
   ///
   ///              ARRAY or ROW:
   ///                folly::dynamic array where each element is a serialized
@@ -460,6 +474,22 @@ class Variant {
   /// C++ values, use the template-based create() methods or constructors
   /// instead.
   static Variant create(const folly::dynamic& obj);
+
+  static Variant unionVariant(const Variant& variant) {
+    return {
+        TypeKind::UNION,
+        new
+        typename detail::VariantTypeTraits<TypeKind::UNION, false>::stored_type{
+            variant}};
+  }
+
+  static Variant unionVariant(Variant&& variant) {
+    return {
+        TypeKind::UNION,
+        new
+        typename detail::VariantTypeTraits<TypeKind::UNION, false>::stored_type{
+            std::move(variant)}};
+  }
 
   static Variant row(const std::vector<Variant>& inputs) {
     return {

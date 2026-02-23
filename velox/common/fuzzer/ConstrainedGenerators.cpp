@@ -144,6 +144,9 @@ folly::dynamic JsonInputGenerator::convertVariantToDynamic(
       }
       return array;
     }
+    case TypeKind::UNION: {
+      return convertVariantToDynamic(object.value<TypeKind::UNION>());
+    }
     default:
       VELOX_UNREACHABLE("Unsupported type");
   }
@@ -475,6 +478,16 @@ std::unique_ptr<AbstractInputGenerator> getRandomInputGenerator(
           seed, type->childAt(i), nullRatio, mapKeys, maxContainerSize));
     }
     generator = std::make_unique<RandomInputGenerator<RowType>>(
+        seed, type, std::move(children), nullRatio);
+  } else if (type->isUnion()) {
+    std::vector<std::unique_ptr<AbstractInputGenerator>> children;
+    children.reserve(type->size());
+
+    for (auto i = 0; i < type->size(); ++i) {
+      children.push_back(getRandomInputGenerator(
+          seed, type->childAt(i), nullRatio, mapKeys, maxContainerSize));
+    }
+    generator = std::make_unique<RandomInputGenerator<UnionType>>(
         seed, type, std::move(children), nullRatio);
   }
   return generator;

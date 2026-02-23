@@ -77,6 +77,21 @@ class CopyPreserveEncodingsTest : public testing::Test {
             : noNulls);
   }
 
+  UnionVectorPtr generateUnionVector(
+      const std::unordered_set<TestOptions>& testOptions = {}) {
+    auto unionType = UNION({INTEGER(), VARCHAR()});
+
+    return vectorMaker_.unionVector(
+        unionType,
+        10,
+        [](vector_size_t i) {
+          return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+        },
+        testOptions.count(TestOptions::WITH_NULLS) > 0
+            ? [](vector_size_t i) { return i % 3 == 0; }
+            : nullptr);
+  }
+
   template <TypeKind kind>
   void validateCopyPreserveEncodingsSimpleVector(
       const VectorPtr& base,
@@ -169,6 +184,27 @@ class CopyPreserveEncodingsTest : public testing::Test {
         validateCopyPreserveEncodings(baseMap->mapKeys(), copyMap->mapKeys());
         validateCopyPreserveEncodings(
             baseMap->mapValues(), copyMap->mapValues());
+        break;
+      }
+      case VectorEncoding::Simple::UNION: {
+        auto* baseUnion = base->as<UnionVector>();
+        auto* copyUnion = copy->as<UnionVector>();
+
+        ASSERT_NE(baseUnion->tags(), copyUnion->tags());
+        ASSERT_NE(baseUnion->offsets(), copyUnion->offsets());
+
+        ASSERT_EQ(baseUnion->childrenSize(), copyUnion->childrenSize());
+
+        const auto& baseChildren = baseUnion->children();
+        const auto& copyChildren = copyUnion->children();
+
+        for (size_t i = 0; i < baseUnion->childrenSize(); i++) {
+          if (baseChildren[i] == nullptr) {
+            ASSERT_EQ(copyChildren[i], nullptr);
+          } else {
+            validateCopyPreserveEncodings(baseChildren[i], copyChildren[i]);
+          }
+        }
         break;
       }
       case VectorEncoding::Simple::BIASED:
@@ -272,6 +308,55 @@ TEST_F(CopyPreserveEncodingsTest, rowNoNulls) {
 
   assertEqualVectors(rowVector, copy);
   validateCopyPreserveEncodings(rowVector, copy);
+}
+
+TEST_F(CopyPreserveEncodingsTest, unionNoNulls) {
+  auto unionVector = generateUnionVector();
+  auto copy = unionVector->testingCopyPreserveEncodings();
+
+  assertEqualVectors(unionVector, copy);
+  validateCopyPreserveEncodings(unionVector, copy);
+}
+
+TEST_F(CopyPreserveEncodingsTest, unionHasNulls) {
+  auto unionVector = generateUnionVector({TestOptions::WITH_NULLS});
+  auto copy = unionVector->testingCopyPreserveEncodings();
+
+  assertEqualVectors(unionVector, copy);
+  validateCopyPreserveEncodings(unionVector, copy);
+}
+
+TEST_F(CopyPreserveEncodingsTest, nestedUnionInRow) {
+  auto unionVector = generateUnionVector({TestOptions::WITH_NULLS});
+  auto flatVector =
+      vectorMaker_.flatVector<int32_t>({1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+
+  auto rowVector = vectorMaker_.rowVector({flatVector, unionVector});
+  auto copy = rowVector->testingCopyPreserveEncodings();
+
+  assertEqualVectors(rowVector, copy);
+  validateCopyPreserveEncodings(rowVector, copy);
+}
+
+TEST_F(CopyPreserveEncodingsTest, unionWithComplexType) {
+  auto arrayVector = generateArrayVector();
+  auto intVector =
+      vectorMaker_.flatVector<int32_t>({1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+
+  auto unionType =
+      UNION({INTEGER(), arrayVector->type()}); // UNION<ARRAY<INTEGER>, INTEGER>
+
+  auto complexUnion =
+      vectorMaker_.unionVector(unionType, 10, [](vector_size_t i) {
+        if (i % 2 == 0)
+          return Variant(i);
+        return Variant::array({Variant(i), Variant(i + 1)});
+      });
+
+  auto copy = complexUnion->testingCopyPreserveEncodings();
+
+  assertEqualVectors(complexUnion, copy);
+  validateCopyPreserveEncodings(complexUnion, copy);
 }
 
 TEST_F(CopyPreserveEncodingsTest, constantNull) {

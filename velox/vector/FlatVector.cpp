@@ -202,6 +202,15 @@ void FlatVector<StringView>::acquireSharedStringBuffersRecursive(
       return;
     }
 
+    case VectorEncoding::Simple::UNION: {
+      for (auto& child : source->asUnchecked<UnionVector>()->children()) {
+        if (child) {
+          acquireSharedStringBuffersRecursive(child.get());
+        }
+      }
+      return;
+    }
+
     case VectorEncoding::Simple::ROW: {
       for (auto& child : source->asUnchecked<RowVector>()->children()) {
         acquireSharedStringBuffersRecursive(child.get());

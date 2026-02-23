@@ -768,6 +768,120 @@ struct VectorReader<DynamicRow> {
   std::vector<std::unique_ptr<VectorReader<Any>>> childReaders_;
 };
 
+// analogical to DynamicRowView but for union type
+template <bool returnsOptionalValues>
+class DynamicUnionView {
+  using readers_t = std::vector<std::unique_ptr<VectorReader<Any>>>;
+
+ public:
+  DynamicUnionView(
+      const readers_t* childReaders,
+      uint8_t tag,
+      vector_size_t offset)
+      : childReaders_{*childReaders}, offset_{offset}, tag_(tag) {}
+
+  using elem_t = typename std::conditional<
+      returnsOptionalValues,
+      OptionalAccessor<Any>,
+      GenericView>::type;
+
+  uint8_t index() const {
+    return tag_;
+  }
+
+  elem_t value() const {
+    if constexpr (returnsOptionalValues) {
+      return elem_t{childReaders_[tag_].get(), offset_};
+    } else {
+      return childReaders_[tag_]->operator[](offset_);
+    }
+  }
+
+ private:
+  const readers_t& childReaders_;
+  const vector_size_t offset_;
+  const uint8_t tag_;
+};
+
+template <>
+struct VectorReader<DynamicUnion> {
+  using in_vector_t = UnionVector;
+  using exec_in_t = DynamicUnionView<true>;
+  using exec_null_free_in_t = DynamicUnionView<false>;
+
+  explicit VectorReader(const DecodedVector* decoded)
+      : decoded_(*decoded),
+        vector_(detail::getDecoded<in_vector_t>(decoded_)),
+        rawTags_(vector_.rawTags()),
+        rawOffsets_(vector_.rawOffsets()) {
+    auto numChildren = vector_.childrenSize();
+    childrenDecoders_.resize(numChildren);
+    childReaders_.resize(numChildren);
+
+    for (int i = 0; i < numChildren; i++) {
+      if (vector_.childAt(i) == nullptr) {
+        childReaders_[i] = nullptr;
+      } else {
+        childReaders_[i] = std::make_unique<VectorReader<Any>>(
+            detail::decode(childrenDecoders_[i], *vector_.childAt(i)));
+      }
+    }
+  }
+
+  exec_in_t operator[](size_t offset) const {
+    auto baseIndex = decoded_.index(offset);
+    auto tag = rawTags_[baseIndex];
+
+    VELOX_CHECK(
+        childReaders_[tag] != nullptr,
+        "Null child reader found for tag {}",
+        tag);
+    return {&childReaders_, tag, rawOffsets_[baseIndex]};
+  }
+
+  exec_null_free_in_t readNullFree(size_t offset) const {
+    auto baseIndex = decoded_.index(offset);
+    auto tag = rawTags_[baseIndex];
+
+    VELOX_CHECK(
+        childReaders_[tag] != nullptr,
+        "Null child reader found for tag {}",
+        tag);
+    return {&childReaders_, tag, rawOffsets_[baseIndex]};
+  }
+
+  bool isSet(size_t offset) const {
+    if (decoded_.isNullAt(offset)) {
+      return false;
+    }
+    auto baseIndex = decoded_.index(offset);
+    auto tag = rawTags_[baseIndex];
+    auto childOffset = rawOffsets_[baseIndex];
+    VELOX_CHECK(
+        childReaders_[tag] != nullptr,
+        "Null child reader found for tag {}",
+        tag);
+    return childReaders_[tag]->isSet(childOffset);
+  }
+
+  bool mayHaveNulls() const {
+    return decoded_.mayHaveNulls();
+  }
+
+  const BaseVector* baseVector() const {
+    return decoded_.base();
+  }
+
+ private:
+  const DecodedVector& decoded_;
+  const in_vector_t& vector_;
+  const uint8_t* rawTags_;
+  const vector_size_t* rawOffsets_;
+
+  std::vector<DecodedVector> childrenDecoders_;
+  std::vector<std::unique_ptr<VectorReader<Any>>> childReaders_;
+};
+
 template <typename T, bool providesCustomComparison>
 struct VectorReader<CustomType<T, providesCustomComparison>>
     : public VectorReader<typename T::type> {

@@ -332,6 +332,11 @@ TEST_F(VectorFuzzerTest, constants) {
   ASSERT_EQ(VectorEncoding::Simple::CONSTANT, vector->encoding());
   ASSERT_FALSE(vector->mayHaveNulls());
 
+  vector = fuzzer.fuzzConstant(UNION({ARRAY(BIGINT()), ARRAY(SMALLINT()), SMALLINT()}));
+  ASSERT_TRUE(vector->type()->kindEquals(UNION({ARRAY(BIGINT()), ARRAY(SMALLINT()), SMALLINT()})));
+  ASSERT_EQ(VectorEncoding::Simple::CONSTANT, vector->encoding());
+  ASSERT_FALSE(vector->mayHaveNulls());
+
   // Fuzzer should produce null constant for UNKNOWN type even if nullRatio is
   // 0.
   vector = fuzzer.fuzzConstant(UNKNOWN());
@@ -516,6 +521,17 @@ TEST_F(VectorFuzzerTest, row) {
       vector->type()->asRow().names(), ::testing::ElementsAre("c0", "c1"));
 }
 
+TEST_F(VectorFuzzerTest, union) {
+  VectorFuzzer::Options opts;
+  opts.nullRatio = 0.5;
+  VectorFuzzer fuzzer(opts, pool());
+
+  auto vector = fuzzer.fuzzUnion(UNION({INTEGER(), REAL(), ARRAY(SMALLINT())}));
+  ASSERT_TRUE(
+      vector->type()->kindEquals(UNION({INTEGER(), REAL(), ARRAY(SMALLINT())})));
+  ASSERT_TRUE(vector->mayHaveNulls());
+}
+
 TEST_F(VectorFuzzerTest, containerHasNulls) {
   auto countNulls = [](const VectorPtr& vec) {
     if (!vec->nulls()) {
@@ -538,23 +554,29 @@ TEST_F(VectorFuzzerTest, containerHasNulls) {
     auto arrayVector = fuzzer.fuzz(ARRAY(BIGINT()));
     auto mapVector = fuzzer.fuzz(MAP(BIGINT(), BIGINT()));
     auto rowVector = fuzzer.fuzz(ROW({BIGINT(), BIGINT()}));
+    auto unionVector =  fuzzer.fuzz(UNION({BIGINT(), REAL()}));
 
     // Check that both top level and elements have nulls.
     EXPECT_GT(countNulls(arrayVector), 0);
     EXPECT_GT(countNulls(mapVector), 0);
     EXPECT_GT(countNulls(rowVector), 0);
+    EXPECT_GT(countNulls(unionVector), 0);
 
     auto arrayElements = arrayVector->as<ArrayVector>()->elements();
     auto mapKeys = mapVector->as<MapVector>()->mapKeys();
     auto mapValues = mapVector->as<MapVector>()->mapValues();
     auto rowCol0 = rowVector->as<RowVector>()->childAt(0);
     auto rowCol1 = rowVector->as<RowVector>()->childAt(1);
+    auto unionCol0 = unionVector->as<UnionVector>()->childAt(0);
+    auto unionCol1 = unionVector->as<UnionVector>()->childAt(1);
 
     EXPECT_GT(countNulls(arrayElements), 0);
     EXPECT_GT(countNulls(mapKeys), 0);
     EXPECT_GT(countNulls(mapValues), 0);
     EXPECT_GT(countNulls(rowCol0), 0);
     EXPECT_GT(countNulls(rowCol1), 0);
+    EXPECT_GT(countNulls(unionCol0), 0);
+    EXPECT_GT(countNulls(unionCol1), 0);
   }
 
   // Test with containerHasNulls false.
@@ -565,23 +587,29 @@ TEST_F(VectorFuzzerTest, containerHasNulls) {
     auto arrayVector = fuzzer.fuzz(ARRAY(BIGINT()));
     auto mapVector = fuzzer.fuzz(MAP(BIGINT(), BIGINT()));
     auto rowVector = fuzzer.fuzz(ROW({BIGINT(), BIGINT()}));
+    auto unionVector =  fuzzer.fuzz(UNION({BIGINT(), REAL()}));
 
     // Check that both top level and elements have nulls.
     EXPECT_GT(countNulls(arrayVector), 0);
     EXPECT_GT(countNulls(mapVector), 0);
     EXPECT_GT(countNulls(rowVector), 0);
+    EXPECT_GT(countNulls(unionVector), 0);
 
     auto arrayElements = arrayVector->as<ArrayVector>()->elements();
     auto mapKeys = mapVector->as<MapVector>()->mapKeys();
     auto mapValues = mapVector->as<MapVector>()->mapValues();
     auto rowCol0 = rowVector->as<RowVector>()->childAt(0);
     auto rowCol1 = rowVector->as<RowVector>()->childAt(1);
+    auto unionCol0 = unionVector->as<UnionVector>()->childAt(0);
+    auto unionCol1 = unionVector->as<UnionVector>()->childAt(1);
+
 
     EXPECT_EQ(countNulls(arrayElements), 0);
     EXPECT_EQ(countNulls(mapKeys), 0);
     EXPECT_EQ(countNulls(mapValues), 0);
     EXPECT_EQ(countNulls(rowCol0), 0);
     EXPECT_EQ(countNulls(rowCol1), 0);
+    EXPECT_EQ(countNulls(unionCol0) + countNulls(unionCol1), 0);
   }
 
   // Test with containerHasNulls false. Flat vector version.
@@ -592,23 +620,28 @@ TEST_F(VectorFuzzerTest, containerHasNulls) {
     auto arrayVector = fuzzer.fuzzFlat(ARRAY(BIGINT()));
     auto mapVector = fuzzer.fuzzFlat(MAP(BIGINT(), BIGINT()));
     auto rowVector = fuzzer.fuzzFlat(ROW({BIGINT(), BIGINT()}));
+    auto unionVector =  fuzzer.fuzzFlat(UNION({BIGINT(), REAL()}));
 
     // Check that both top level and elements have nulls.
     EXPECT_GT(countNulls(arrayVector), 0);
     EXPECT_GT(countNulls(mapVector), 0);
     EXPECT_GT(countNulls(rowVector), 0);
+    EXPECT_GT(countNulls(unionVector), 0);
 
     auto arrayElements = arrayVector->as<ArrayVector>()->elements();
     auto mapKeys = mapVector->as<MapVector>()->mapKeys();
     auto mapValues = mapVector->as<MapVector>()->mapValues();
     auto rowCol0 = rowVector->as<RowVector>()->childAt(0);
     auto rowCol1 = rowVector->as<RowVector>()->childAt(1);
+    auto unionCol0 = unionVector->as<UnionVector>()->childAt(0);
+    auto unionCol1 = unionVector->as<UnionVector>()->childAt(1);
 
     EXPECT_EQ(countNulls(arrayElements), 0);
     EXPECT_EQ(countNulls(mapKeys), 0);
     EXPECT_EQ(countNulls(mapValues), 0);
     EXPECT_EQ(countNulls(rowCol0), 0);
     EXPECT_EQ(countNulls(rowCol1), 0);
+    EXPECT_EQ(countNulls(unionCol0) + countNulls(unionCol1), 0);
   }
 }
 
@@ -888,12 +921,13 @@ TEST_F(VectorFuzzerTest, fuzzRowChildrenToLazy) {
 TEST_F(VectorFuzzerTest, flatInputRow) {
   VectorFuzzer fuzzer({.vectorSize = 10}, pool());
   auto vector = fuzzer.fuzzInputFlatRow(
-      ROW({DOUBLE(), ARRAY(BIGINT()), MAP(BIGINT(), VARCHAR())}));
+      ROW({DOUBLE(), ARRAY(BIGINT()), MAP(BIGINT(), VARCHAR()), UNION({BIGINT()})}));
   ASSERT_TRUE(vector->type()->kindEquals(
-      ROW({DOUBLE(), ARRAY(BIGINT()), MAP(BIGINT(), VARCHAR())})));
+      ROW({DOUBLE(), ARRAY(BIGINT()), MAP(BIGINT(), VARCHAR()), UNION({BIGINT()})})));
   ASSERT_EQ(VectorEncoding::Simple::FLAT, vector->childAt(0)->encoding());
   ASSERT_EQ(VectorEncoding::Simple::ARRAY, vector->childAt(1)->encoding());
   ASSERT_EQ(VectorEncoding::Simple::MAP, vector->childAt(2)->encoding());
+  ASSERT_EQ(VectorEncoding::Simple::UNION, vector->childAt(3)->encoding());
 
   // Arrays.
   auto elements = vector->childAt(1)->as<ArrayVector>()->elements();
@@ -908,6 +942,11 @@ TEST_F(VectorFuzzerTest, flatInputRow) {
   auto mapValues = vector->childAt(2)->as<MapVector>()->mapValues();
   ASSERT_TRUE(mapValues->type()->kindEquals(VARCHAR()));
   ASSERT_EQ(VectorEncoding::Simple::FLAT, mapValues->encoding());
+
+  //Unions
+  auto unionChild = vector->childAt(3)->as<UnionVector>()->childAt(0);
+  ASSERT_TRUE(unionChild->type()->kindEquals(BIGINT()));
+  ASSERT_EQ(VectorEncoding::Simple::FLAT, unionChild->encoding());
 }
 
 void VectorFuzzerTest::validateMaxSizes(VectorPtr vector, size_t maxSize) {
@@ -920,6 +959,11 @@ void VectorFuzzerTest::validateMaxSizes(VectorPtr vector, size_t maxSize) {
   } else if (vector->typeKind() == TypeKind::ROW) {
     auto rowVector = vector->as<RowVector>();
     for (const auto& child : rowVector->children()) {
+      validateMaxSizes(child, maxSize);
+    }
+  } else if (vector->typeKind() == TypeKind::UNION) {
+    auto unionVector = vector->as<UnionVector>();
+    for (const auto& child : unionVector->children()) {
       validateMaxSizes(child, maxSize);
     }
   }
@@ -946,6 +990,10 @@ TEST_F(VectorFuzzerTest, complexTooLarge) {
   // Mix and match.
   vector = fuzzer.fuzzFlat(
       ROW({ARRAY(ROW({SMALLINT(), ROW({MAP(INTEGER(), DOUBLE())})}))}));
+  validateMaxSizes(vector, opts.complexElementsMaxSize);
+
+  vector = fuzzer.fuzzFlat(
+      UNION({ARRAY(UNION({SMALLINT(), ROW({MAP(INTEGER(), DOUBLE())})}))}));
   validateMaxSizes(vector, opts.complexElementsMaxSize);
 
   // Try a more restrictive max size.

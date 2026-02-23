@@ -91,6 +91,15 @@ void serializeOne<TypeKind::ROW>(
   }
 }
 
+template <>
+void serializeOne<TypeKind::UNION>(
+    const BaseVector& vector,
+    vector_size_t index,
+    ByteOutputStream& out,
+    const ContainerRowSerdeOptions& options) {
+  VELOX_NYI();
+}
+
 void writeNulls(
     const BaseVector& values,
     vector_size_t offset,
@@ -312,6 +321,14 @@ void deserializeOne<TypeKind::ROW>(
   result.setNull(index, false);
 }
 
+template <>
+void deserializeOne<TypeKind::UNION>(
+    ByteInputStream& in,
+    vector_size_t index,
+    BaseVector& result) {
+  VELOX_NYI();
+}
+
 // Reads the size, null flags and deserializes from 'in', appending to
 // the end of 'elements'. Returns the number of added elements and
 // sets 'offset' to the index of the first added element.
@@ -505,6 +522,18 @@ std::optional<int32_t> compare(
     return result;
   }
   return 0;
+}
+
+template <
+    bool typeProvidesCustomComparison,
+    TypeKind Kind,
+    std::enable_if_t<Kind == TypeKind::UNION, int32_t> = 0>
+std::optional<int32_t> compare(
+    ByteInputStream& left,
+    const BaseVector& right,
+    vector_size_t index,
+    CompareFlags flags) {
+  VELOX_NYI();
 }
 
 template <bool elementTypeProvidesCustomComparison>
@@ -825,6 +854,18 @@ std::optional<int32_t> compare(
 template <
     bool typeProvidesCustomComparison,
     TypeKind Kind,
+    std::enable_if_t<Kind == TypeKind::UNION, int32_t> = 0>
+std::optional<int32_t> compare(
+    ByteInputStream& left,
+    ByteInputStream& right,
+    const Type* type,
+    CompareFlags flags) {
+  VELOX_NYI();
+}
+
+template <
+    bool typeProvidesCustomComparison,
+    TypeKind Kind,
     std::enable_if_t<Kind == TypeKind::ARRAY, int32_t> = 0>
 std::optional<int32_t> compare(
     ByteInputStream& left,
@@ -943,6 +984,14 @@ void hashArray(
     }
     consumer(hash);
   }
+}
+
+template <
+    bool typeProvidesCustomComparison,
+    TypeKind Kind,
+    std::enable_if_t<Kind == TypeKind::UNION, int32_t> = 0>
+uint64_t hashOne(ByteInputStream& in, const Type* type) {
+  VELOX_NYI();
 }
 
 template <

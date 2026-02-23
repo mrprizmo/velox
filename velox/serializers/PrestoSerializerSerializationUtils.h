@@ -54,6 +54,7 @@ static inline const std::string_view kMap{"MAP"};
 static inline const std::string_view kRow{"ROW"};
 static inline const std::string_view kRLE{"RLE"};
 static inline const std::string_view kDictionary{"DICTIONARY"};
+static inline const std::string_view kUnion{"UNION"}; // non-presto type.
 
 void initBitsToMapOnce();
 

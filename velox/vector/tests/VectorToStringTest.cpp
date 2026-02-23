@@ -94,6 +94,50 @@ TEST_F(VectorToStringTest, row) {
       "2: {3, 444.55999755859375, true}");
 }
 
+TEST_F(VectorToStringTest, unions) {
+  auto unionType = UNION({INTEGER(), VARCHAR()});
+
+  auto unionVector = makeUnionVector(unionType, 4, [](auto i) {
+    return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+  });
+
+  ASSERT_EQ(
+      unionVector->toString(),
+      "[UNION UNION<INTEGER,VARCHAR>: 4 elements, no nulls]");
+  ASSERT_EQ(unionVector->toString(0), "{tag: 0, value: 0}");
+  ASSERT_EQ(unionVector->toString(1), "{tag: 1, value: 1}");
+
+  auto unionWithNulls = makeUnionVector(
+      unionType,
+      4,
+      [](auto i) {
+        if (i == 3)
+          return Variant::null(TypeKind::VARCHAR);
+        return i % 2 == 0 ? Variant(i) : Variant(std::to_string(i));
+      },
+      [](auto i) { return i == 1; });
+
+  ASSERT_EQ(
+      unionWithNulls->toString(),
+      "[UNION UNION<INTEGER,VARCHAR>: 4 elements, 1 nulls]");
+  ASSERT_EQ(unionWithNulls->toString(1), "null");
+  ASSERT_EQ(unionWithNulls->toString(3), "null");
+
+  auto constantUnion = BaseVector::wrapInConstant(10, 0, unionVector);
+  ASSERT_EQ(
+      constantUnion->toString(true),
+      "[CONSTANT UNION<INTEGER,VARCHAR>: 10 elements, {tag: 0, value: 0}], "
+      "[UNION UNION<INTEGER,VARCHAR>: 4 elements, no nulls]");
+
+  auto indices = makeIndices({3, 2, 1, 0});
+  auto dictUnion =
+      BaseVector::wrapInDictionary(nullptr, indices, 4, unionVector);
+  ASSERT_EQ(
+      dictUnion->toString(),
+      "[DICTIONARY UNION<INTEGER,VARCHAR>: 4 elements, no nulls]");
+  ASSERT_EQ(dictUnion->toString(0), "[0->3] {tag: 1, value: 3}");
+}
+
 TEST_F(VectorToStringTest, opaque) {
   auto opaque = BaseVector::create(OPAQUE<int>(), 10, pool_.get());
 

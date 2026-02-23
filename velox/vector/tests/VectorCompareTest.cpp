@@ -575,6 +575,68 @@ TEST_F(VectorCompareTest, CompareWithNullChildVector) {
   test::assertEqualVectors(rowVector1, rowVector2);
 }
 
+TEST_F(VectorCompareTest, compareNullAsIndeterminateUnion) {
+  auto unionType = UNION({INTEGER(), VARCHAR()});
+
+  auto unionVector = vectorMaker_.unionVector(
+      unionType,
+      8,
+      [](vector_size_t i) {
+        static Variant values[] = {
+            Variant(10),
+            Variant(10),
+            Variant(20),
+            Variant("abc"),
+            Variant("abc"),
+            Variant::null(TypeKind::INTEGER),
+            Variant(10),
+            Variant("xyz")};
+        return values[i];
+      },
+      [](vector_size_t i) { return i == 6; });
+
+  testCompare(unionVector, 0, 1, kEquality, kEq); // Tag 0: 10 == 10
+  testCompare(unionVector, 3, 4, kEquality, kEq); // Tag 1: "abc" == "abc"
+
+  testCompare(unionVector, 0, 2, kEquality, kNeq); // Tag 0: 10 != 20
+
+  testCompare(
+      unionVector, 0, 3, kEquality, kNeq); // Tag 0 (INT) != Tag 1 (VARCHAR)
+
+  testCompare(unionVector, 0, 6, kEquality, kIndeterminate);
+  testCompare(unionVector, 6, 6, kEquality, kIndeterminate);
+
+  testCompare(unionVector, 0, 5, kEquality, kIndeterminate);
+  testCompare(unionVector, 5, 5, kEquality, kIndeterminate);
+
+  testCompare(unionVector, 0, 2, kOrderingAsc, -1); // 10 < 20
+  testCompare(unionVector, 2, 0, kOrderingAsc, 1); // 20 > 10
+
+  testCompare(unionVector, 0, 3, kOrderingAsc, -1); // Tag 0 < Tag 1
+  testCompare(unionVector, 3, 0, kOrderingAsc, 1); // Tag 1 > Tag 0
+  testCompare(unionVector, 0, 3, kOrderingDesc, 1); // Descending
+
+  testOrderingThrow(unionVector, 0, 6); // Top-level null
+  testOrderingThrow(unionVector, 0, 5); // Nested null
+  testOrderingThrow(unionVector, 5, 6); // Both null
+}
+
+TEST_F(VectorCompareTest, compareUnionWithRow) {
+  auto rowType = ROW({INTEGER(), VARCHAR()});
+  auto unionType = UNION({rowType});
+
+  auto row1 = Variant::row({1, "a"});
+  auto row2 = Variant::row({1, "b"});
+
+  auto unionVector = vectorMaker_.unionVector(
+      unionType, 2, [&](auto i) { return i == 0 ? row1 : row2; });
+
+  // make sure that Union correctly passes the comparison call inside RowVector.
+  // Field 0 is the same (1), field 1 is different ("a" < "b").
+  testCompare(unionVector, 0, 1, kOrderingAsc, -1);
+  testCompare(unionVector, 0, 1, kEquality, kNeq);
+}
+
 TEST_F(VectorCompareTest, customComparisonFlat) {
   auto flatVector = vectorMaker_.flatVectorNullable<int64_t>(
       {0, 1, std::nullopt, 256, 257},

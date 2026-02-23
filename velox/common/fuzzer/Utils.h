@@ -80,6 +80,13 @@ RowTypePtr randRowType(
     const std::vector<TypePtr>& mapKeyTypes = {},
     const std::vector<TypePtr>& mapValueTypes = {});
 
+UnionTypePtr randUnionType(
+    FuzzerGenerator& rng,
+    const std::vector<TypePtr>& scalarTypes,
+    int maxDepth,
+    const std::vector<TypePtr>& mapKeyTypes = {},
+    const std::vector<TypePtr>& mapValueTypes = {});
+
 struct DataSpec {
   bool includeNaN;
   bool includeInfinity;

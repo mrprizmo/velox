@@ -775,6 +775,148 @@ struct VectorWriter<DynamicRow, void> : public VectorWriterBase {
   vector_t* rowVector_ = nullptr;
 };
 
+class DynamicUnionWriter {
+ public:
+  using child_writer_t = GenericWriter;
+  using writers_t = std::vector<std::shared_ptr<VectorWriter<Any, void>>>;
+
+  void initialize(BaseVector* vector) {
+    unionVector_ = vector->as<UnionVector>();
+    auto childrenVectors = unionVector_->children();
+    childrenCount_ = childrenVectors.size();
+
+    tags_ = unionVector_->tags()->asMutable<uint8_t>();
+    offsets_ = unionVector_->offsets()->asMutable<vector_size_t>();
+
+    childrenWriters_.reserve(childrenCount_);
+    for (int i = 0; i < childrenCount_; ++i) {
+      childrenWriters_.push_back(std::make_shared<VectorWriter<Any, void>>());
+      childrenWriters_[i]->init(*childrenVectors[i]);
+      childrenWriters_[i]->ensureSize(1);
+    }
+  }
+
+  child_writer_t& set_tag(uint8_t tag) {
+    VELOX_USER_CHECK_LT(tag, childrenCount_, "Union tag out of range.");
+
+    unionVector_->ensureChild(tag);
+    vector_size_t childOffset = unionVector_->childAt(tag)->size();
+    childrenWriters_[tag]->ensureSize(childOffset + 1);
+    offsets_[offset_] = childOffset;
+    tags_[offset_] = tag;
+
+    needCommit_ = true;
+
+    childrenWriters_[tag]->setOffset(childOffset);
+    return childrenWriters_[tag]->current();
+  }
+
+  void set_null() {
+    unionVector_->setNull(offset_, true);
+  }
+
+  uint8_t find_tag(const TypePtr& type) const {
+    return unionVector_->type()->asUnion().typeIndex(type);
+  }
+
+  void reserve(uint8_t tag, vector_size_t k) {
+    VELOX_NYI();
+  }
+
+  void finalizeNull() {
+    if (needCommit_) {
+      uint8_t tag = tags_[offset_];
+      childrenWriters_[tag]->finalizeNull();
+      needCommit_ = false;
+    }
+  }
+
+  void finalize() {
+    if (needCommit_) {
+      uint8_t tag = tags_[offset_];
+      childrenWriters_[tag]->commit(true);
+      needCommit_ = false;
+    }
+  }
+
+ private:
+  writers_t childrenWriters_;
+  UnionVector* unionVector_;
+  size_t childrenCount_;
+  uint8_t* tags_;
+  vector_size_t* offsets_;
+
+  vector_size_t offset_ = 0;
+  bool needCommit_ = false;
+
+  template <typename A, typename B>
+  friend struct VectorWriter;
+  friend class GenericWriter;
+
+  DynamicUnionWriter() = default;
+};
+
+template <>
+struct VectorWriter<DynamicUnion, void> : public VectorWriterBase {
+  using vector_t = UnionVector;
+  using exec_out_t = DynamicUnionWriter;
+
+  void init(vector_t& vector) {
+    unionVector_ = &vector;
+    writer_.initialize(unionVector_);
+  }
+
+  void finish() override {
+    for (int i = 0; i < writer_.childrenCount_; ++i) {
+      writer_.childrenWriters_[i]->finish();
+    }
+  }
+
+  exec_out_t& current() {
+    return writer_;
+  }
+
+  vector_t& vector() {
+    return *unionVector_;
+  }
+
+  void ensureSize(vector_size_t size) override {
+    VELOX_CHECK_GE(size, 0);
+    if (size > unionVector_->size()) {
+      unionVector_->resize(size, false);
+
+      writer_.tags_ = unionVector_->tags()->asMutable<uint8_t>();
+      writer_.offsets_ = unionVector_->offsets()->asMutable<vector_size_t>();
+    }
+  }
+
+  void finalizeNull() override {
+    writer_.finalizeNull();
+  }
+
+  void commitNull() {
+    finalizeNull();
+    unionVector_->setNull(writer_.offset_, true);
+  }
+
+  void commit(bool isSet = true) override {
+    if (LIKELY(isSet)) {
+      unionVector_->setNull(writer_.offset_, false);
+      writer_.finalize();
+    } else {
+      commitNull();
+    }
+  }
+
+  void setOffset(vector_size_t offset) override {
+    writer_.offset_ = offset;
+  }
+
+ private:
+  DynamicUnionWriter writer_;
+  vector_t* unionVector_ = nullptr;
+};
+
 template <typename T, bool providesCustomComparison>
 struct VectorWriter<CustomType<T, providesCustomComparison>>
     : public VectorWriter<typename T::type> {};

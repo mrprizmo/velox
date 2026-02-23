@@ -98,6 +98,27 @@ void compareVectors(const VectorPtr& actual, const VectorPtr& expected) {
       compareVectors(actualArray->elements(), expectedArray->elements());
       break;
     }
+    case VectorEncoding::Simple::UNION: {
+      auto actualWrapped = actual->wrappedVector()->as<UnionVector>();
+      auto expectedWrapped = expected->wrappedVector()->as<UnionVector>();
+
+      for (vector_size_t i = 0; i < actual->size(); ++i) {
+        if (!actual->isNullAt(i)) {
+          auto actualIdx = actual->wrappedIndex(i);
+          auto expectedIdx = expected->wrappedIndex(i);
+
+          ASSERT_EQ(
+              actualWrapped->tagAt(actualIdx),
+              expectedWrapped->tagAt(expectedIdx))
+              << "Tag mismatch at index " << i;
+
+          ASSERT_TRUE(actual->equalValueAt(expected.get(), i, i))
+              << "Value mismatch at " << i << ": " << actual->toString(i);
+        }
+      }
+
+      break;
+    }
     default:
       test::assertEqualVectors(expected, actual);
   }
@@ -442,6 +463,51 @@ TEST_P(EncodedVectorCopyTest, dictionaryRowToFlat) {
   auto expected = wrapInDictionary(
       makeIndices({0, 1, 2, 3}),
       makeRowVector({makeFlatVector<int64_t>({44, 45, 42, 43})}));
+  runTests(source, folly::Range(&range, 1), target, expected);
+}
+
+TEST_P(EncodedVectorCopyTest, flatUnion) {
+  auto type = UNION({INTEGER(), DOUBLE()});
+
+  auto source = makeUnionVector(type, {Variant(10), Variant(1.1), Variant(20)});
+  VectorPtr target = makeUnionVector(type, {Variant(30), Variant(2.2)});
+
+  BaseVector::CopyRange range = {1, 2, 2};
+
+  auto expected = makeUnionVector(
+      type, {Variant(30), Variant(2.2), Variant(1.1), Variant(20)});
+
+  runTests(source, folly::Range(&range, 1), target, expected);
+}
+
+TEST_P(EncodedVectorCopyTest, constantUnion) {
+  auto type = UNION({INTEGER(), VARCHAR()});
+  auto source = makeConstantUnion(
+      asUnionType(type), Variant::unionVariant(Variant("apple")), 5);
+
+  VectorPtr target = makeUnionVector(type, {Variant(100)});
+  BaseVector::CopyRange range = {0, 1, 2};
+
+  auto expectedBase = makeUnionVector(type, {Variant(100), Variant("apple")});
+  auto expected = wrapInDictionary(makeIndices({0, 1, 1}), 3, expectedBase);
+
+  runTests(source, folly::Range(&range, 1), target, expected);
+}
+
+TEST_P(EncodedVectorCopyTest, dictionaryUnion) {
+  auto type = UNION({INTEGER(), DOUBLE()});
+
+  auto base = makeUnionVector(type, {Variant(10), Variant(1.1)});
+  auto indices = makeIndices({0, 0, 1, 1});
+  auto source = wrapInDictionary(indices, 4, base);
+
+  VectorPtr target = makeUnionVector(type, {Variant(11), Variant(1.2)});
+  BaseVector::CopyRange range = {1, 1, 2};
+
+  auto expectedBase = makeUnionVector(
+      type, {Variant(11), Variant(1.2), Variant(10), Variant(1.1)});
+  auto expected = wrapInDictionary(makeIndices({0, 2, 3, 1}), 3, expectedBase);
+
   runTests(source, folly::Range(&range, 1), target, expected);
 }
 

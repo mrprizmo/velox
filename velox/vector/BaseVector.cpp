@@ -108,6 +108,23 @@ Variant rowVariantAt(const BaseVector* vector, vector_size_t row) {
   return Variant::row(std::move(values));
 }
 
+Variant unionVariantAt(const BaseVector* vector, vector_size_t row) {
+  auto unionVector = vector->wrappedVector()->as<UnionVector>();
+  auto wrappedRow = vector->wrappedIndex(row);
+
+  if (unionVector->isNullAt(wrappedRow)) {
+    return nullVariant(unionVector->type());
+  }
+
+  auto tag = unionVector->tagAt(wrappedRow);
+  auto offset = unionVector->offsetAt(wrappedRow);
+
+  auto& child = unionVector->childAt(tag);
+  auto value = variantAtImpl(child.get(), offset);
+
+  return Variant::unionVariant(value);
+}
+
 Variant variantAtImpl(const BaseVector* vector, vector_size_t row) {
   if (vector->isNullAt(row)) {
     return nullVariant(vector->type());
@@ -124,6 +141,10 @@ Variant variantAtImpl(const BaseVector* vector, vector_size_t row) {
 
   if (typeKind == TypeKind::MAP) {
     return mapVariantAt(vector, row);
+  }
+
+  if (typeKind == TypeKind::UNION) {
+    return unionVariantAt(vector, row);
   }
 
   if (typeKind == TypeKind::OPAQUE) {
@@ -451,6 +472,17 @@ VectorPtr BaseVector::createInternal(
           std::move(keys),
           std::move(values));
     }
+    case TypeKind::UNION: {
+      BufferPtr tags = allocateTags(size, pool);
+      BufferPtr offsets = allocateOffsets(size, pool);
+
+      auto& unionType = type->asUnion();
+      std::vector<VectorPtr> children;
+      children.assign(unionType.size(), nullptr);
+      
+      return std::make_shared<UnionVector>(
+        pool, type, nullptr, size, std::move(children), std::move(tags), std::move(offsets));
+    }
     case TypeKind::UNKNOWN: {
       BufferPtr nulls = allocateNulls(size, pool, bits::kNull);
       return std::make_shared<FlatVector<UnknownValue>>(
@@ -722,6 +754,7 @@ void BaseVector::ensureWritable(
       case VectorEncoding::Simple::ROW:
       case VectorEncoding::Simple::ARRAY:
       case VectorEncoding::Simple::MAP:
+      case VectorEncoding::Simple::UNION:
       case VectorEncoding::Simple::FLAT_MAP:
       case VectorEncoding::Simple::FUNCTION: {
         result->ensureWritable(rows);
@@ -992,6 +1025,55 @@ struct VariantToVector<TypeKind::ROW> {
   }
 };
 
+template <>
+struct VariantToVector<TypeKind::UNION> {
+  static VectorPtr makeVector(
+      TypePtr type,
+      const std::vector<Variant>& data,
+      memory::MemoryPool* pool) {
+    
+    auto size = data.size();
+    auto& unionType = type->asUnion();
+    auto numChildren = unionType.size();
+
+    BufferPtr tags = allocateTags(size, pool);
+    BufferPtr offsets = allocateOffsets(size, pool);
+    BufferPtr nulls = allocateNulls(size, pool);
+    
+    auto rawTags = tags->asMutable<uint8_t>();
+    auto rawOffsets = offsets->asMutable<vector_size_t>();
+    auto rawNulls = nulls->asMutable<uint64_t>();
+
+    std::vector<std::vector<Variant>> childVariants(numChildren);
+    vector_size_t nullCount = 0;
+
+    for (size_t i = 0; i < size; ++i) {
+      if (data[i].isNull()) {
+        bits::setNull(rawNulls, i, true);
+        ++nullCount;
+        continue;
+      }
+
+      const auto& inner = data[i].value<TypeKind::UNION>();
+      auto innerType = inner.inferType();
+      
+      uint8_t tag = unionType.typeIndex(innerType);
+      rawTags[i] = tag;
+      rawOffsets[i] = static_cast<vector_size_t>(childVariants[tag].size());
+      childVariants[tag].push_back(inner);
+    }
+
+    std::vector<VectorPtr> children;
+    children.reserve(numChildren);
+    for (size_t j = 0; j < numChildren; ++j) {
+      children.push_back(callMakeVector(unionType.childAt(j), childVariants[j], pool));
+    }
+
+    return std::make_shared<UnionVector>(
+        pool, type, nulls, size, std::move(children), std::move(tags), std::move(offsets), nullCount);
+  }
+};
+
 VectorPtr callMakeVector(
     TypePtr type,
     const std::vector<Variant>& data,
@@ -1156,6 +1238,8 @@ bool isLazyNotLoaded(const BaseVector& vector) {
                                   : false;
     case VectorEncoding::Simple::ROW:
       return vector.asUnchecked<RowVector>()->containsLazyNotLoaded();
+    case VectorEncoding::Simple::UNION:
+      return vector.asUnchecked<UnionVector>()->containsLazyNotLoaded(); 
     default:
       return false;
   }
@@ -1189,7 +1273,8 @@ bool isReusableEncoding(VectorEncoding::Simple encoding) {
   return encoding == VectorEncoding::Simple::FLAT ||
       encoding == VectorEncoding::Simple::ARRAY ||
       encoding == VectorEncoding::Simple::MAP ||
-      encoding == VectorEncoding::Simple::ROW;
+      encoding == VectorEncoding::Simple::ROW ||
+      encoding == VectorEncoding::Simple::UNION;
 }
 } // namespace
 
@@ -1217,6 +1302,15 @@ void BaseVector::flattenVector(VectorPtr& vector) {
       auto* mapVector = vector->asUnchecked<MapVector>();
       BaseVector::flattenVector(mapVector->mapKeys());
       BaseVector::flattenVector(mapVector->mapValues());
+      return;
+    }
+    case VectorEncoding::Simple::UNION: {
+      auto* unionVector = vector->asUnchecked<UnionVector>();
+      for (auto& child : unionVector->children()) {
+        if (child) {
+          BaseVector::flattenVector(child);
+        }
+      }
       return;
     }
     case VectorEncoding::Simple::LAZY: {
