@@ -278,9 +278,11 @@ class UnionVectorPrinter : public VectorPrinterBase {
     auto tag = unionVector->tagAt(baseIndex);
     auto offset = unionVector->offsetAt(baseIndex);
 
-    VELOX_CHECK(children_[tag] != nullptr, "Null child printer found for tag {}", tag);
+    VELOX_CHECK(
+        children_[tag] != nullptr, "Null child printer found for tag {}", tag);
 
-    out << indent << "Tag " << static_cast<int32_t>(tag) << " (Offset " << offset << "):" << std::endl;
+    out << indent << "Tag " << static_cast<int32_t>(tag) << " (Offset "
+        << offset << "):" << std::endl;
     out << children_[tag]->print(offset, addIndent(indent));
 
     return out.str();
@@ -290,11 +292,8 @@ class UnionVectorPrinter : public VectorPrinterBase {
     auto* base = decoded_.base()->as<UnionVector>();
     auto baseIndex = decoded_.index(index);
     auto tag = base->tagAt(baseIndex);
-    
-    return fmt::format(
-        "{} (active tag: {})",
-        base->type()->toString(),
-        tag);
+
+    return fmt::format("{} (active tag: {})", base->type()->toString(), tag);
   }
 };
 

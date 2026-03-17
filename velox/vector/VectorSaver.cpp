@@ -580,7 +580,7 @@ VectorPtr readUnionVector(
   auto numChildren = read<int32_t>(in);
   std::vector<VectorPtr> children;
   children.reserve(numChildren);
-  
+
   for (auto i = 0; i < numChildren; ++i) {
     bool present = read<bool>(in);
     if (present) {
@@ -591,13 +591,7 @@ VectorPtr readUnionVector(
   }
 
   return std::make_shared<UnionVector>(
-    pool, 
-    type, 
-    std::move(nulls), 
-    size, 
-    std::move(children), 
-    std::move(tags)
-  );
+      pool, type, std::move(nulls), size, std::move(children), std::move(tags));
 }
 
 void writeArrayVector(const BaseVector& vector, std::ostream& out) {

@@ -57,8 +57,12 @@ UnionVector::UnionVector(
       type->size(),
       "Number of child vectors must match Union type size.");
 
-  VELOX_CHECK_GE(tags_->size(), length * sizeof(uint8_t), "Tags buffer is too small.");
-  VELOX_CHECK_GE(offsets_->size(), length * sizeof(vector_size_t), "Offsets buffer is too small.");
+  VELOX_CHECK_GE(
+      tags_->size(), length * sizeof(uint8_t), "Tags buffer is too small.");
+  VELOX_CHECK_GE(
+      offsets_->size(),
+      length * sizeof(vector_size_t),
+      "Offsets buffer is too small.");
 
   for (uint32_t i = 0; i < children_.size(); ++i) {
     if (children_[i]) {
@@ -81,7 +85,6 @@ BufferPtr UnionVector::computeOffsets(
     size_t numChildren,
     velox::memory::MemoryPool* pool,
     std::vector<vector_size_t>& childCounts) {
-  
   auto offsets = allocateOffsets(length, pool);
   auto* rawOffsets = offsets->asMutable<vector_size_t>();
   auto* rawTags = tags->as<uint8_t>();
@@ -96,8 +99,12 @@ BufferPtr UnionVector::computeOffsets(
     }
 
     uint8_t tag = rawTags[i];
-    VELOX_CHECK_LT(static_cast<size_t>(tag), numChildren, "Tag out of range at index {}", i);
-    
+    VELOX_CHECK_LT(
+        static_cast<size_t>(tag),
+        numChildren,
+        "Tag out of range at index {}",
+        i);
+
     rawOffsets[i] = childCounts[tag]++;
   }
 
@@ -124,26 +131,33 @@ UnionVector::UnionVector(
       childrenSize_(children_.size()),
       tags_(std::move(tags)),
       rawTags_(tags_->as<uint8_t>()) {
-
   VELOX_CHECK(type->isUnion(), "UnionVector requires a UNION type.");
   VELOX_CHECK_EQ(
       children_.size(),
       type->size(),
       "Number of child vectors must match Union type size.");
-  VELOX_CHECK_GE(tags_->size(), length * sizeof(uint8_t), "Tags buffer is too small.");
+  VELOX_CHECK_GE(
+      tags_->size(), length * sizeof(uint8_t), "Tags buffer is too small.");
 
   std::vector<vector_size_t> counters;
-  offsets_ = computeOffsets(length, tags_, nulls_, childrenSize_, pool, counters);
+  offsets_ =
+      computeOffsets(length, tags_, nulls_, childrenSize_, pool, counters);
   rawOffsets_ = offsets_->as<vector_size_t>();
 
   for (uint32_t i = 0; i < childrenSize_; ++i) {
     if (children_[i]) {
-      VELOX_DCHECK(children_[i]->type()->kindEquals(type->childAt(i)),
+      VELOX_DCHECK(
+          children_[i]->type()->kindEquals(type->childAt(i)),
           "Child vector type mismatch at index {}: expected {}, got {}.",
-          i, type->childAt(i)->toString(), children_[i]->type()->toString());
+          i,
+          type->childAt(i)->toString(),
+          children_[i]->type()->toString());
 
-      VELOX_DCHECK_GE(children_[i]->size(), counters[i], 
-          "Child vector for tag {} is too small for the computed offsets", i);
+      VELOX_DCHECK_GE(
+          children_[i]->size(),
+          counters[i],
+          "Child vector for tag {} is too small for the computed offsets",
+          i);
     }
   }
 
@@ -151,21 +165,23 @@ UnionVector::UnionVector(
 }
 
 void UnionVector::ensureChild(uint8_t tag) {
-  auto &child = children_[tag];
+  auto& child = children_[tag];
   if (!child) {
     child = BaseVector::create(type_->childAt(tag), 0, pool());
   }
 }
 
-vector_size_t UnionVector::ensureAndAllocateChild(uint8_t tag, vector_size_t size) {
-  auto &child = children_[tag];
+vector_size_t UnionVector::ensureAndAllocateChild(
+    uint8_t tag,
+    vector_size_t size) {
+  auto& child = children_[tag];
   if (!child) {
     child = BaseVector::create(type_->childAt(tag), size, pool());
     return 0;
-  } 
+  }
   vector_size_t next = child->size();
   child->resize(next + size);
-  
+
   return next;
 }
 
@@ -180,19 +196,6 @@ bool UnionVector::containsNullAt(vector_size_t index) const {
   VELOX_DCHECK(child, "child must be non-null");
 
   return child->containsNullAt(offsetAt(index));
-}
-
-bool UnionVector::isNullAt(vector_size_t index) const {
-  if (BaseVector::isNullAt(index)) {
-    return true;
-  }
-
-  auto tag = tagAt(index);
-  VELOX_DCHECK_LT(static_cast<size_t>(tag), children_.size());
-  const auto& child = children_[tag];
-  VELOX_DCHECK(child, "child must be non-null");
-
-  return child->isNullAt(offsetAt(index));
 }
 
 std::optional<int32_t> UnionVector::compare(
@@ -246,7 +249,6 @@ std::unique_ptr<SimpleVector<uint64_t>> UnionVector::hashAll() const {
   VELOX_NYI();
 }
 
-
 void UnionVector::copy(
     const BaseVector* source,
     vector_size_t targetIndex,
@@ -273,12 +275,14 @@ void UnionVector::copyRanges(
 
   SelectivityVector rows(maxTargetIndex, false);
 
-  BufferPtr toSourceRowBuffer = AlignedBuffer::allocate<vector_size_t>(maxTargetIndex, pool_);
+  BufferPtr toSourceRowBuffer =
+      AlignedBuffer::allocate<vector_size_t>(maxTargetIndex, pool_);
   auto* rawToSourceRow = toSourceRowBuffer->asMutable<vector_size_t>();
 
   for (const auto& range : ranges) {
     if (range.count > 0) {
-      rows.setValidRange(range.targetIndex, range.targetIndex + range.count, true);
+      rows.setValidRange(
+          range.targetIndex, range.targetIndex + range.count, true);
       for (vector_size_t i = 0; i < range.count; ++i) {
         rawToSourceRow[range.targetIndex + i] = range.sourceIndex + i;
       }
@@ -341,28 +345,30 @@ void UnionVector::copy(
     if (rowsPerTag[i] > 0) {
       childOffsets[i] = ensureAndAllocateChild(i, rowsPerTag[i]);
       vector_size_t childSize = children_[i]->size();
-      
+
       // mask for child vector rows to be copied
       childSelectivity.emplace_back(childSize, false);
       childSelectivity.back().setValidRange(childOffsets[i], childSize, true);
       childSelectivity.back().updateBounds();
 
-      childMappingBuffers[i] = AlignedBuffer::allocate<vector_size_t>(childSize, pool_);
+      childMappingBuffers[i] =
+          AlignedBuffer::allocate<vector_size_t>(childSize, pool_);
       rawChildMappings[i] = childMappingBuffers[i]->asMutable<vector_size_t>();
     } else {
       childSelectivity.emplace_back(0, false);
     }
   }
 
-  auto mutableTags = tags_->asMutable<uint8_t>();
-  auto mutableOffsets = offsets_->asMutable<vector_size_t>();
-  
+  auto mutableTags = this->mutableTags(length_)->asMutable<uint8_t>();
+  auto mutableOffsets =
+      this->mutableOffsets(length_)->asMutable<vector_size_t>();
+
   std::vector<vector_size_t> currentChildWriteIndex = childOffsets;
 
   nonNullRows.applyToSelected([&](vector_size_t row) {
     auto sIdx = toSourceRow ? toSourceRow[row] : row;
     auto baseIdx = decodedSource.index(sIdx);
-    
+
     uint8_t tag = sourceUnionBase->tagAt(baseIdx);
     vector_size_t sOffset = sourceUnionBase->offsetAt(baseIdx);
     vector_size_t tOffset = currentChildWriteIndex[tag]++;
@@ -375,7 +381,10 @@ void UnionVector::copy(
   for (uint32_t i = 0; i < numChildren; ++i) {
     if (rowsPerTag[i] > 0) {
       children_[i]->ensureWritable(childSelectivity[i]);
-      children_[i]->copy(sourceUnionBase->childAt(i).get(), childSelectivity[i], rawChildMappings[i]);
+      children_[i]->copy(
+          sourceUnionBase->childAt(i).get(),
+          childSelectivity[i],
+          rawChildMappings[i]);
     }
   }
 
@@ -425,31 +434,9 @@ void UnionVector::resizeTags(
 
 void UnionVector::resize(vector_size_t newSize, bool setNotNull) {
   const vector_size_t oldSize = length_;
-  BaseVector::resizeIndices(oldSize, newSize, pool_, offsets_, &rawOffsets_);
-  UnionVector::resizeTags(oldSize, newSize, pool_);
-
   if (newSize > oldSize) {
-      
-    if (setNotNull) {
-      // TODO: optimize default value filling
-      const uint8_t defaultTag = 0;
-      
-      ensureChild(defaultTag);
-
-      auto& child0 = children_[defaultTag];
-      vector_size_t child0OldSize = child0->size();
-      vector_size_t numAddedRows = newSize - oldSize;
-
-      auto* mutableOffsets = offsets_->asMutable<vector_size_t>();
-      for (vector_size_t i = 0; i < numAddedRows; ++i) {
-        mutableOffsets[oldSize + i] = child0OldSize + i;
-      }
-      child0->resize(child0OldSize + numAddedRows, true);
-      
-      updateContainsLazyNotLoaded();
-    } else if (!nulls_) {
-      ensureNullsCapacity(newSize, false);
-    }
+    BaseVector::resizeIndices(oldSize, newSize, pool_, offsets_, &rawOffsets_);
+    UnionVector::resizeTags(oldSize, newSize, pool_);
   }
 
   BaseVector::resize(newSize, setNotNull);
@@ -474,7 +461,8 @@ void UnionVector::ensureWritable(const SelectivityVector& rows) {
   if (!tags_->isMutable() || tags_->capacity() < length_ * sizeof(uint8_t)) {
     auto newTags = AlignedBuffer::allocate<uint8_t>(length_, pool_);
     if (rawTags_) {
-      memcpy(newTags->asMutable<uint8_t>(), rawTags_, length_ * sizeof(uint8_t));
+      memcpy(
+          newTags->asMutable<uint8_t>(), rawTags_, length_ * sizeof(uint8_t));
     }
     tags_ = std::move(newTags);
     rawTags_ = tags_->as<uint8_t>();
@@ -535,7 +523,7 @@ uint64_t UnionVector::estimateFlatSize() const {
       size += child->estimateFlatSize();
     }
   }
-  
+
   return size;
 }
 
@@ -547,7 +535,8 @@ std::string UnionVector::toString(vector_size_t index) const {
   VELOX_CHECK_LT(static_cast<size_t>(tag), children_.size());
   const auto& child = children_[tag];
 
-  return fmt::format("{{tag: {}, value: {}}}", tag, child->toString(offsetAt(index)));
+  return fmt::format(
+      "{{tag: {}, value: {}}}", tag, child->toString(offsetAt(index)));
 }
 
 void UnionVector::validate(const VectorValidateOptions& options) const {

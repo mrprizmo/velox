@@ -455,6 +455,39 @@ void serializeMapVectorRanges(
       mapVector->mapValues(), childRanges, stream->childAt(1), scratch);
 }
 
+void serializeUnionVectorRanges(
+    const VectorPtr& vector,
+    const folly::Range<const IndexRange*>& ranges,
+    VectorStream* stream,
+    Scratch& scratch) {
+  auto unionVector = vector->as<UnionVector>();
+  auto rawTags = unionVector->rawTags();
+  auto rawOffsets = unionVector->rawOffsets();
+  std::vector<std::vector<IndexRange>> childRanges(unionVector->childrenSize());
+
+  for (int32_t i = 0; i < ranges.size(); ++i) {
+    int32_t begin = ranges[i].begin;
+    int32_t end = begin + ranges[i].size;
+    for (int32_t offset = begin; offset < end; ++offset) {
+      if (unionVector->BaseVector::isNullAt(offset)) {
+        stream->appendNull();
+      } else {
+        stream->appendNonNull();
+        uint8_t tag = rawTags[offset];
+        stream->appendTag(tag);
+        childRanges[tag].emplace_back<IndexRange>({rawOffsets[offset], 1});
+      }
+    }
+  }
+
+  for (int32_t i = 0; i < unionVector->childrenSize(); ++i) {
+    if (!childRanges[i].empty()) {
+      serializeColumn(
+          unionVector->childAt(i), childRanges[i], stream->childAt(i), scratch);
+    }
+  }
+}
+
 void appendTimestamps(
     const uint64_t* nulls,
     folly::Range<const vector_size_t*> rows,
@@ -968,6 +1001,65 @@ void serializeMapVector(
       stream->childAt(1),
       scratch);
 }
+
+void serializeUnionVector(
+    const VectorPtr& vector,
+    const folly::Range<const vector_size_t*>& rows,
+    VectorStream* stream,
+    Scratch& scratch) {
+  auto* unionVector = vector->as<UnionVector>();
+  const auto* rawTags = unionVector->rawTags();
+  const auto* rawOffsets = unionVector->rawOffsets();
+  const int32_t numChildren = unionVector->childrenSize();
+  const int32_t numRows = rows.size();
+
+  ScratchPtr<int32_t, 16> countHolder(scratch);
+  auto* counts = countHolder.get(numChildren);
+  memset(counts, 0, numChildren * sizeof(int32_t));
+
+  for (int32_t i = 0; i < numRows; ++i) {
+    if (!unionVector->BaseVector::isNullAt(rows[i])) {
+      ++counts[rawTags[rows[i]]];
+    }
+  }
+
+  ScratchPtr<int32_t, 16> startHolder(scratch);
+  auto* starts = startHolder.get(numChildren + 1);
+  starts[0] = 0;
+  for (int32_t i = 0; i < numChildren; ++i) {
+    starts[i + 1] = starts[i] + counts[i];
+  }
+  const int32_t total = starts[numChildren];
+
+  memcpy(counts, starts, numChildren * sizeof(int32_t));
+
+  ScratchPtr<vector_size_t, 64> childRowsHolder(scratch);
+  auto* childRows = childRowsHolder.get(std::max(total, 1));
+
+  for (int32_t i = 0; i < numRows; ++i) {
+    const auto row = rows[i];
+    if (unionVector->BaseVector::isNullAt(row)) {
+      stream->appendNull();
+    } else {
+      stream->appendNonNull();
+      const uint8_t tag = rawTags[row];
+      stream->appendTag(tag);
+      childRows[counts[tag]++] = rawOffsets[row];
+    }
+  }
+
+  for (int32_t i = 0; i < numChildren; ++i) {
+    const int32_t childCount = starts[i + 1] - starts[i];
+    if (childCount == 0) {
+      continue;
+    }
+    serializeColumn(
+        unionVector->childAt(i),
+        folly::Range<const vector_size_t*>(childRows + starts[i], childCount),
+        stream->childAt(i),
+        scratch);
+  }
+}
 } // namespace
 
 void initBitsToMapOnce() {
@@ -1017,6 +1109,8 @@ std::string_view typeToEncodingName(const TypePtr& type) {
         return kVariableWidth;
       }
       return kRow;
+    case TypeKind::UNION:
+      return kUnion;
     case TypeKind::UNKNOWN:
       return kByteArray;
     case TypeKind::OPAQUE:
@@ -1085,6 +1179,9 @@ void serializeColumn(
     case VectorEncoding::Simple::MAP:
       serializeMapVectorRanges(vector, ranges, stream, scratch);
       break;
+    case VectorEncoding::Simple::UNION:
+      serializeUnionVectorRanges(vector, ranges, stream, scratch);
+      break;
     case VectorEncoding::Simple::LAZY:
       serializeColumn(
           BaseVector::loadedVectorShared(vector), ranges, stream, scratch);
@@ -1128,6 +1225,9 @@ void serializeColumn(
       break;
     case VectorEncoding::Simple::MAP:
       serializeMapVector(vector, rows, stream, scratch);
+      break;
+    case VectorEncoding::Simple::UNION:
+      serializeUnionVector(vector, rows, stream, scratch);
       break;
     case VectorEncoding::Simple::LAZY:
       serializeColumn(

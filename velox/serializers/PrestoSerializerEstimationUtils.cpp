@@ -341,6 +341,50 @@ void estimateSerializedSizeInt(
           scratch);
       break;
     }
+    case VectorEncoding::Simple::UNION: {
+      auto* unionVector = vector->as<UnionVector>();
+      const auto* rawTags = unionVector->rawTags();
+      const auto* rawOffsets = unionVector->rawOffsets();
+      const int32_t numChildren = unionVector->childrenSize();
+
+      std::vector<std::vector<IndexRange>> childRanges(numChildren);
+      std::vector<std::vector<vector_size_t*>> childSizes(numChildren);
+
+      for (int32_t rangeIdx = 0; rangeIdx < ranges.size(); ++rangeIdx) {
+        const int32_t begin = ranges[rangeIdx].begin;
+        const int32_t end = begin + ranges[rangeIdx].size;
+        bool hasNull = false;
+
+        for (int32_t offset = begin; offset < end; ++offset) {
+          if (vector->isNullAt(offset)) {
+            hasNull = true;
+          } else {
+            *sizes[rangeIdx] += sizeof(uint8_t);
+
+            const uint8_t tag = rawTags[offset];
+            childRanges[tag].push_back(IndexRange{rawOffsets[offset], 1});
+            childSizes[tag].push_back(sizes[rangeIdx]);
+          }
+        }
+
+        if (hasNull) {
+          *sizes[rangeIdx] +=
+              static_cast<int32_t>(bits::nbytes(ranges[rangeIdx].size));
+        }
+      }
+
+      for (int32_t i = 0; i < numChildren; ++i) {
+        if (childRanges[i].empty()) {
+          continue;
+        }
+        estimateSerializedSizeInt(
+            unionVector->childAt(i).get(),
+            childRanges[i],
+            childSizes[i].data(),
+            scratch);
+      }
+      break;
+    }
     case VectorEncoding::Simple::LAZY:
       estimateSerializedSizeInt(vector->loadedVector(), ranges, sizes, scratch);
       break;
@@ -386,7 +430,7 @@ void expandRepeatedRanges(
     int32_t end = begin + ranges[i].size;
     bool hasNull = false;
     for (int32_t offset = begin; offset < end; ++offset) {
-      if (vector->isNullAt(offset)) {
+      if (vector->BaseVector::isNullAt(offset)) {
         hasNull = true;
       } else {
         // Add the size of the length.
@@ -531,6 +575,65 @@ void estimateSerializedSizeInt(
           folly::Range<const IndexRange*>(rangeHolder.get(), numRanges),
           sizesHolder.get(),
           scratch);
+      break;
+    }
+    case VectorEncoding::Simple::UNION: {
+      auto* unionVector = vector->as<UnionVector>();
+      const auto* rawTags = unionVector->rawTags();
+      const auto* rawOffsets = unionVector->rawOffsets();
+      const int32_t numChildren = unionVector->childrenSize();
+
+      ScratchPtr<int32_t, 16> countHolder(scratch);
+      auto* counts = countHolder.get(numChildren);
+      memset(counts, 0, numChildren * sizeof(int32_t));
+
+      for (auto i = 0; i < numRows; ++i) {
+        if (!vector->BaseVector::isNullAt(rows[i])) {
+          ++counts[rawTags[rows[i]]];
+        }
+      }
+
+      ScratchPtr<int32_t, 16> startHolder(scratch);
+      auto* starts = startHolder.get(numChildren + 1);
+      starts[0] = 0;
+      for (int32_t i = 0; i < numChildren; ++i) {
+        starts[i + 1] = starts[i] + counts[i];
+      }
+      const int32_t total = starts[numChildren];
+
+      if (total == 0) {
+        break;
+      }
+
+      memcpy(counts, starts, numChildren * sizeof(int32_t));
+
+      ScratchPtr<vector_size_t, 64> childRowsHolder(scratch);
+      ScratchPtr<vector_size_t*, 64> childSizesHolder(scratch);
+      auto* childRows = childRowsHolder.get(total);
+      auto* childSizePtrs = childSizesHolder.get(total);
+
+      for (auto i = 0; i < numRows; ++i) {
+        const auto row = rows[i];
+        if (!vector->isNullAt(row)) {
+          const uint8_t tag = rawTags[row];
+          const int32_t pos = counts[tag]++;
+          childRows[pos] = rawOffsets[row];
+          childSizePtrs[pos] = sizes[i];
+        }
+      }
+
+      for (int32_t i = 0; i < numChildren; ++i) {
+        const int32_t childCount = starts[i + 1] - starts[i];
+        if (childCount == 0) {
+          continue;
+        }
+        estimateSerializedSizeInt(
+            unionVector->childAt(i).get(),
+            folly::Range<const vector_size_t*>(
+                childRows + starts[i], childCount),
+            childSizePtrs + starts[i],
+            scratch);
+      }
       break;
     }
     case VectorEncoding::Simple::LAZY:

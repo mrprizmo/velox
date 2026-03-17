@@ -79,7 +79,6 @@ VectorStream::VectorStream(
   if (initialNumRows == 0) {
     initializeHeader(typeToEncodingName(type), *streamArena);
     if (type_->size() > 0 && !isIpPrefix_) {
-      hasLengths_ = true;
       children_.reserve(type_->size());
       for (int32_t i = 0; i < type_->size(); ++i) {
         children_.emplace_back(
@@ -91,11 +90,16 @@ VectorStream::VectorStream(
             opts_);
       }
 
-      // The first element in the offsets in the wire format is always 0 for
-      // nested types. Set upon construction/reset in case empty (no append
-      // calls will be made).
-      lengths_.startWrite(sizeof(vector_size_t));
-      lengths_.appendOne<int32_t>(0);
+      if (type_->kind() != TypeKind::UNION) {
+        // The first element in the offsets in the wire format is always 0 for
+        // nested types. Set upon construction/reset in case empty (no append
+        // calls will be made).
+        hasLengths_ = true;
+        lengths_.startWrite(sizeof(vector_size_t));
+        lengths_.appendOne<int32_t>(0);
+      } else {
+        startWriteTags();
+      }
     }
     return;
   }
@@ -235,7 +239,7 @@ void VectorStream::flush(OutputStream* out) {
   switch (type_->kind()) {
     case TypeKind::ROW:
       if (isIPPrefixType(type_)) {
-        writeInt32(out, nullCount_ + nonNullCount_);
+        writeInt32(out, size());
         lengths_.flush(out);
         flushNulls(out);
         writeInt32(out, values_.size());
@@ -244,7 +248,7 @@ void VectorStream::flush(OutputStream* out) {
       }
 
       if (opts_.nullsFirst) {
-        writeInt32(out, nullCount_ + nonNullCount_);
+        writeInt32(out, size());
         flushNulls(out);
       }
 
@@ -253,7 +257,7 @@ void VectorStream::flush(OutputStream* out) {
         child.flush(out);
       }
       if (!opts_.nullsFirst) {
-        writeInt32(out, nullCount_ + nonNullCount_);
+        writeInt32(out, size());
         lengths_.flush(out);
         flushNulls(out);
       }
@@ -261,7 +265,7 @@ void VectorStream::flush(OutputStream* out) {
 
     case TypeKind::ARRAY:
       children_[0].flush(out);
-      writeInt32(out, nullCount_ + nonNullCount_);
+      writeInt32(out, size());
       lengths_.flush(out);
       flushNulls(out);
       return;
@@ -271,17 +275,40 @@ void VectorStream::flush(OutputStream* out) {
       children_[1].flush(out);
       // hash table size. -1 means not included in serialization.
       writeInt32(out, -1);
-      writeInt32(out, nullCount_ + nonNullCount_);
+      writeInt32(out, size());
 
       lengths_.flush(out);
       flushNulls(out);
       return;
     }
+    case TypeKind::UNION: {
+      writeInt32(out, children_.size());
+      writeInt32(out, size());
+      writeInt32(out, nonNullCount_); // needed for tags
+      flushTag(out);
 
+      // children's bitmask
+      ByteOutputStream used(streamArena_, true);
+      used.startWrite(children_.size());
+
+      for (auto& child : children_) {
+        used.appendBool(child.size() > 0, 1);
+      }
+      used.flush(out);
+
+      for (auto& child : children_) {
+        if (child.size() > 0) {
+          child.flush(out);
+        }
+      }
+
+      flushNulls(out);
+      return;
+    }
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY:
     case TypeKind::OPAQUE:
-      writeInt32(out, nullCount_ + nonNullCount_);
+      writeInt32(out, size());
       lengths_.flush(out);
       flushNulls(out);
       writeInt32(out, values_.size());
@@ -289,7 +316,7 @@ void VectorStream::flush(OutputStream* out) {
       return;
 
     default:
-      writeInt32(out, nullCount_ + nonNullCount_);
+      writeInt32(out, size());
       flushNulls(out);
       values_.flush(out);
   }
@@ -321,7 +348,10 @@ void VectorStream::clear() {
       // calls will be made).
       lengths_.appendOne<int32_t>(0);
     }
+  } else if (type_->kind() == TypeKind::UNION) {
+    startWriteTags(lengths_.size());
   }
+
   nulls_.startWrite(nulls_.size());
   values_.startWrite(values_.size());
   for (auto& child : children_) {
@@ -384,6 +414,8 @@ void VectorStream::initializeFlatStream(
       [[fallthrough]];
     case TypeKind::ARRAY:
       [[fallthrough]];
+    case TypeKind::UNION:
+      [[fallthrough]];
     case TypeKind::MAP:
       // Velox represents ipprefix as a row, but we need
       // to serialize the data type as varbinary to be compatible with Java
@@ -395,7 +427,6 @@ void VectorStream::initializeFlatStream(
         }
         break;
       }
-      hasLengths_ = true;
       children_.reserve(type_->size());
       for (int32_t i = 0; i < type_->size(); ++i) {
         children_.emplace_back(
@@ -406,11 +437,17 @@ void VectorStream::initializeFlatStream(
             initialNumRows,
             opts_);
       }
-      // The first element in the offsets in the wire format is always 0 for
-      // nested types. Set upon construction/reset in case empty (no append
-      // calls will be made).
-      lengths_.startWrite(sizeof(vector_size_t));
-      lengths_.appendOne<int32_t>(0);
+
+      if (type_->kind() != TypeKind::UNION) {
+        // The first element in the offsets in the wire format is always 0 for
+        // nested types. Set upon construction/reset in case empty (no append
+        // calls will be made).
+        hasLengths_ = true;
+        lengths_.startWrite(sizeof(vector_size_t));
+        lengths_.appendOne<int32_t>(0);
+      } else {
+        startWriteTags();
+      }
       break;
     case TypeKind::OPAQUE:
       [[fallthrough]];

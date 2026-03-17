@@ -518,14 +518,13 @@ class VectorTest : public testing::Test, public velox::test::VectorTestBase {
     SCOPED_TRACE(printEncodings(source));
     testCopyEncoded(source);
 
-    /*
     if (source->type()->isOpaque()) {
       // No support for serialization of opaque types yet, make sure something
       // throws
       EXPECT_THROW(testSerialization(source), std::exception);
     } else {
       testSerialization(source);
-    }*/
+    }
 
     if (level == 0) {
       return;
@@ -1156,7 +1155,6 @@ TEST_F(VectorTest, union) {
 
   baseUnion = createUnion(vectorSize_, true);
   testCopy(baseUnion, numIterations_);
-
   testSlices(baseUnion);
 
   auto allNull = BaseVector::createNullConstant(baseUnion->type(), 50, pool());
@@ -1182,7 +1180,7 @@ TEST_F(VectorTest, unionNulls) {
   EXPECT_TRUE(unionVector->isNullAt(1));
   EXPECT_TRUE(unionVector->containsNullAt(1));
 
-  EXPECT_TRUE(unionVector->isNullAt(2));
+  EXPECT_FALSE(unionVector->isNullAt(2));
   EXPECT_TRUE(unionVector->containsNullAt(2));
 
   EXPECT_FALSE(unionVector->isNullAt(3));

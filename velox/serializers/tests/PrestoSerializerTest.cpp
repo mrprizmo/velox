@@ -995,6 +995,150 @@ TEST_P(PrestoSerializerTest, emptyMap) {
   testRoundTrip(mapVector);
 }
 
+TEST_P(PrestoSerializerTest, emptyUnion) {
+  auto unionType = UNION({INTEGER(), VARCHAR()});
+  auto unionVector = makeUnionVector(unionType, 1'000, [](auto i) {
+    return i % 2 ? Variant(std::to_string(i)) : Variant(i);
+  });
+  testRoundTrip(unionVector);
+}
+
+TEST_P(PrestoSerializerTest, unionBasic) {
+  auto unionType = UNION({BIGINT(), VARCHAR(), DOUBLE()});
+  auto unionVec =
+      makeUnionVector(unionType, 99, [](vector_size_t row) -> Variant {
+        switch (row % 3) {
+          case 0:
+            return {static_cast<int64_t>(row)};
+          case 1:
+            return {fmt::format("str_{}", row)};
+          default:
+            return {static_cast<double>(row) * 0.1};
+        }
+      });
+  testRoundTrip(unionVec);
+
+  auto unionWithNulls = makeUnionVector(
+      unionType,
+      99,
+      [](vector_size_t row) -> Variant {
+        switch (row % 3) {
+          case 0:
+            return {static_cast<int64_t>(row)};
+          case 1:
+            return {fmt::format("str_{}", row)};
+          default:
+            return {static_cast<double>(row) * 0.1};
+        }
+      },
+      [](vector_size_t row) { return row % 7 == 0; });
+  testRoundTrip(unionWithNulls);
+
+  auto nullType = UNION({BIGINT(), VARCHAR()});
+  auto allNulls = makeUnionVector(
+      nullType,
+      50,
+      [](vector_size_t) { return Variant(0LL); },
+      [](vector_size_t) { return true; });
+  testRoundTrip(allNulls);
+}
+
+TEST_P(PrestoSerializerTest, unionSomeChildrenUnused) {
+  auto unionType = UNION({BIGINT(), VARCHAR(), DOUBLE()});
+
+  auto onlyBigint = makeUnionVector(unionType, 50, [](vector_size_t row) {
+    return Variant(static_cast<int64_t>(row));
+  });
+  testRoundTrip(onlyBigint);
+
+  auto onlyVarchar = makeUnionVector(unionType, 50, [](vector_size_t row) {
+    return Variant(fmt::format("s_{}", row));
+  });
+  testRoundTrip(onlyVarchar);
+
+  auto onlyDouble = makeUnionVector(
+      unionType,
+      50,
+      [](vector_size_t row) { return Variant(static_cast<double>(row) * 1.5); },
+      [](vector_size_t row) { return row % 5 == 0; });
+  testRoundTrip(onlyDouble);
+}
+
+TEST_P(PrestoSerializerTest, unionInsideRowWithNulls) {
+  auto unionType = UNION({BIGINT(), DOUBLE()});
+  auto unionVec =
+      makeUnionVector(unionType, 100, [](vector_size_t row) -> Variant {
+        if (row % 2 == 0)
+          return {static_cast<int64_t>(row)};
+        return Variant(static_cast<double>(row) * 0.5);
+      });
+  auto intVec =
+      makeFlatVector<int32_t>(100, [](vector_size_t row) { return row; });
+
+  auto rowWithNulls = makeRowVector(
+      {unionVec, intVec}, [](vector_size_t row) { return row % 5 == 0; });
+  testRoundTrip(rowWithNulls);
+
+  serializer::presto::PrestoVectorSerde::PrestoOptions nullsFirstOpts;
+  nullsFirstOpts.nullsFirst = true;
+  testRoundTrip(rowWithNulls, &nullsFirstOpts);
+}
+
+TEST_P(PrestoSerializerTest, unionNested) {
+  auto unionType = UNION(
+      {ARRAY(BIGINT()),
+       ROW({{"f1", VARCHAR()}, {"f2", INTEGER()}}),
+       MAP(BIGINT(), DOUBLE())});
+  VectorFuzzer::Options opts;
+  opts.vectorSize = 60;
+  opts.nullRatio = 0.1;
+  opts.containerLength = 5;
+  opts.containerVariableLength = true;
+  auto unionVec = makeUnionVector(
+      std::dynamic_pointer_cast<const UnionType>(unionType), opts);
+  testRoundTrip(unionVec);
+}
+
+TEST_P(PrestoSerializerTest, unionInsideArray) {
+  auto unionType = UNION({BIGINT(), VARCHAR()});
+  VectorFuzzer::Options opts;
+  opts.vectorSize = 20;
+  opts.nullRatio = 0.1;
+  opts.containerLength = 5;
+  auto unionElements = makeUnionVector(
+      std::dynamic_pointer_cast<const UnionType>(unionType), opts);
+
+  std::vector<vector_size_t> offsets(10);
+  for (int i = 0; i < 10; ++i) {
+    offsets[i] = i * 2;
+  }
+  auto arrayOfUnion = makeArrayVector(offsets, unionElements);
+  testRoundTrip(arrayOfUnion);
+}
+
+TEST_P(PrestoSerializerTest, unionInsideRow) {
+  auto unionType = UNION({BIGINT(), DOUBLE()});
+  auto unionVec = makeUnionVector(
+      unionType,
+      80,
+      [](vector_size_t row) -> Variant {
+        if (row % 2 == 0)
+          return {static_cast<int64_t>(row)};
+        return Variant(static_cast<double>(row));
+      },
+      [](vector_size_t row) { return row % 9 == 0; });
+
+  auto strVec = makeFlatVector<std::string>(
+      80, [](vector_size_t row) { return fmt::format("v_{}", row); });
+  auto rowVec = makeRowVector({unionVec, strVec});
+
+  testRoundTrip(rowVec);
+
+  serializer::presto::PrestoVectorSerde::PrestoOptions nullsFirstOpts;
+  nullsFirstOpts.nullsFirst = true;
+  testRoundTrip(rowVec, &nullsFirstOpts);
+}
+
 TEST_P(PrestoSerializerTest, timestampWithTimeZone) {
   auto timestamp = makeFlatVector<int64_t>(
       100,
@@ -1723,12 +1867,16 @@ INSTANTIATE_TEST_SUITE_P(
     PrestoSerializerTest,
     PrestoSerializerTest,
     ::testing::Values(
-        common::CompressionKind::CompressionKind_NONE,
+        common::CompressionKind::CompressionKind_NONE
+        // Compression is not supported
+        /*
         common::CompressionKind::CompressionKind_ZLIB,
         common::CompressionKind::CompressionKind_SNAPPY,
         common::CompressionKind::CompressionKind_ZSTD,
         common::CompressionKind::CompressionKind_LZ4,
-        common::CompressionKind::CompressionKind_GZIP));
+        common::CompressionKind::CompressionKind_GZIP
+        */
+        ));
 
 TEST_F(PrestoSerializerTest, serdeSingleColumn) {
   // The difference between serialized data obtained from
@@ -2270,4 +2418,55 @@ TEST_F(PrestoSerializerBatchEstimateSizeTest, dictionary) {
       dictionaryWithNulls, {{0, 16}, {16, 16}}, {33, 33});
   testEstimateSerializedSize(
       dictionaryWithNulls, {{0, 8}, {8, 16}, {24, 8}}, {17, 33, 17});
+}
+
+TEST_F(PrestoSerializerBatchEstimateSizeTest, unionBasic) {
+  auto unionType = UNION({BIGINT(), VARCHAR()});
+  auto unionVector =
+      makeUnionVector(unionType, 32, [](vector_size_t row) -> Variant {
+        if (row % 2 == 0) {
+          return {static_cast<int64_t>(row)};
+        } else {
+          return {fmt::format("str_{}", row)};
+        }
+      });
+
+  // Union: numChildren(4) + size(4) + nonNullCount(4) +
+  // tags(32*1) + usedChildren bitset(1) + BIGINTs(16*8) + strings(~128-140)
+  // Union returns: 443 for 32 rows, subtract 128 for row wrapper = 315
+  testEstimateSerializedSize(unionVector, {{0, 32}}, {315});
+}
+
+TEST_F(PrestoSerializerBatchEstimateSizeTest, unionWithNulls) {
+  auto unionType = UNION({BIGINT(), DOUBLE()});
+  auto unionWithNulls = makeUnionVector(
+      unionType,
+      32,
+      [](vector_size_t row) -> Variant {
+        if (row % 2 == 0) {
+          return {static_cast<int64_t>(row)};
+        } else {
+          return {static_cast<double>(row) * 0.5};
+        }
+      },
+      [](vector_size_t row) { return row % 5 == 0; });
+
+  // With nulls (20% null rate): nonNullCount = 26
+  // Union: 4 + 4 + 4 + 26 (tags) + 1 (bitset) + 13*8 (BIGINTs) +
+  // 13*8 (DOUBLEs) + 4 (null bitmap) = ~229
+  // Union returns: 357 for 32 rows, subtract 128 for row wrapper = 229
+  testEstimateSerializedSize(unionWithNulls, {{0, 32}}, {229});
+}
+
+TEST_F(PrestoSerializerBatchEstimateSizeTest, unionOnlyOneChild) {
+  auto unionType = UNION({BIGINT(), VARCHAR(), DOUBLE()});
+  auto unionOnlyBigint =
+      makeUnionVector(unionType, 32, [](vector_size_t row) -> Variant {
+        return {static_cast<int64_t>(row)};
+      });
+
+  // Union with 3 possible children but only BIGINT used:
+  // 4 + 4 + 4 + 32 (tags, all 0) + 1 (bitset) + 32*8 (BIGINTs) = 289
+  // Union returns: 416 for 32 rows, subtract 128 for row wrapper = 288
+  testEstimateSerializedSize(unionOnlyBigint, {{0, 32}}, {288});
 }

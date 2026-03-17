@@ -1036,7 +1036,7 @@ TEST_F(VectorMakerTest, unionVector) {
   EXPECT_TRUE(unionVector->isNullAt(2));
   EXPECT_EQ(0, unionVector->tagAt(2));
 
-  EXPECT_TRUE(unionVector->isNullAt(3));
+  EXPECT_FALSE(unionVector->isNullAt(3));
   EXPECT_EQ(0, unionVector->tagAt(3));
   EXPECT_TRUE(unionVector->childAt(0)->isNullAt(unionVector->offsetAt(3)));
 

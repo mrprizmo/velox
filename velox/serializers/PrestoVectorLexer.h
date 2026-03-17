@@ -38,6 +38,7 @@ enum class TokenType {
   HASH_TABLE,
   NUM_FIELDS,
   OFFSETS,
+  BITSET,
 };
 
 struct Token {
@@ -73,10 +74,12 @@ class PrestoVectorLexer {
   Status lexArray();
   Status lexMap();
   Status lexRow();
+  Status lexUnion();
   Status lexDictionary();
   Status lexRLE();
   Status lexNulls(int32_t& numRows);
   Status lexBytes(int32_t numBytes, TokenType tokenType, char* dst = nullptr);
+  Status lexBitSet(int32_t numBits, int32_t& numSet);
 
   template <typename T>
   Status lexInt(TokenType tokenType, T* out = nullptr) {

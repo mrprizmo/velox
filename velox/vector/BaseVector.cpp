@@ -479,9 +479,15 @@ VectorPtr BaseVector::createInternal(
       auto& unionType = type->asUnion();
       std::vector<VectorPtr> children;
       children.assign(unionType.size(), nullptr);
-      
+
       return std::make_shared<UnionVector>(
-        pool, type, nullptr, size, std::move(children), std::move(tags), std::move(offsets));
+          pool,
+          type,
+          nullptr,
+          size,
+          std::move(children),
+          std::move(tags),
+          std::move(offsets));
     }
     case TypeKind::UNKNOWN: {
       BufferPtr nulls = allocateNulls(size, pool, bits::kNull);
@@ -1031,7 +1037,6 @@ struct VariantToVector<TypeKind::UNION> {
       TypePtr type,
       const std::vector<Variant>& data,
       memory::MemoryPool* pool) {
-    
     auto size = data.size();
     auto& unionType = type->asUnion();
     auto numChildren = unionType.size();
@@ -1039,7 +1044,7 @@ struct VariantToVector<TypeKind::UNION> {
     BufferPtr tags = allocateTags(size, pool);
     BufferPtr offsets = allocateOffsets(size, pool);
     BufferPtr nulls = allocateNulls(size, pool);
-    
+
     auto rawTags = tags->asMutable<uint8_t>();
     auto rawOffsets = offsets->asMutable<vector_size_t>();
     auto rawNulls = nulls->asMutable<uint64_t>();
@@ -1056,7 +1061,7 @@ struct VariantToVector<TypeKind::UNION> {
 
       const auto& inner = data[i].value<TypeKind::UNION>();
       auto innerType = inner.inferType();
-      
+
       uint8_t tag = unionType.typeIndex(innerType);
       rawTags[i] = tag;
       rawOffsets[i] = static_cast<vector_size_t>(childVariants[tag].size());
@@ -1066,11 +1071,19 @@ struct VariantToVector<TypeKind::UNION> {
     std::vector<VectorPtr> children;
     children.reserve(numChildren);
     for (size_t j = 0; j < numChildren; ++j) {
-      children.push_back(callMakeVector(unionType.childAt(j), childVariants[j], pool));
+      children.push_back(
+          callMakeVector(unionType.childAt(j), childVariants[j], pool));
     }
 
     return std::make_shared<UnionVector>(
-        pool, type, nulls, size, std::move(children), std::move(tags), std::move(offsets), nullCount);
+        pool,
+        type,
+        nulls,
+        size,
+        std::move(children),
+        std::move(tags),
+        std::move(offsets),
+        nullCount);
   }
 };
 
@@ -1239,7 +1252,7 @@ bool isLazyNotLoaded(const BaseVector& vector) {
     case VectorEncoding::Simple::ROW:
       return vector.asUnchecked<RowVector>()->containsLazyNotLoaded();
     case VectorEncoding::Simple::UNION:
-      return vector.asUnchecked<UnionVector>()->containsLazyNotLoaded(); 
+      return vector.asUnchecked<UnionVector>()->containsLazyNotLoaded();
     default:
       return false;
   }

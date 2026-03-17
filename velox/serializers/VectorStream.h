@@ -107,6 +107,10 @@ class VectorStream {
     lengths_.appendOne<int32_t>(totalLength_);
   }
 
+  void appendTag(uint8_t tag) {
+    lengths_.appendOne<uint8_t>(tag); // using lengths_ like tags_
+  }
+
   void appendNulls(
       const uint64_t* nulls,
       int32_t begin,
@@ -203,6 +207,18 @@ class VectorStream {
   void initializeFlatStream(
       std::optional<VectorPtr> vector,
       vector_size_t initialNumRows);
+
+  int32_t size() const {
+    return nullCount_ + nonNullCount_;
+  }
+
+  void startWriteTags(int64_t size = 0) {
+    lengths_.startWrite(size);
+  }
+
+  void flushTag(OutputStream* out) {
+    lengths_.flush(out);
+  }
 
   const TypePtr type_;
   StreamArena* const streamArena_;

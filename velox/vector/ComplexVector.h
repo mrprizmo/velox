@@ -39,13 +39,13 @@ class UnionVector : public BaseVector {
       std::optional<vector_size_t> nullCount = std::nullopt);
 
   UnionVector(
-    velox::memory::MemoryPool* pool,
-    TypePtr type,
-    BufferPtr nulls,
-    vector_size_t length,
-    std::vector<VectorPtr> children,
-    BufferPtr tags,
-    std::optional<vector_size_t> nullCount = std::nullopt);
+      velox::memory::MemoryPool* pool,
+      TypePtr type,
+      BufferPtr nulls,
+      vector_size_t length,
+      std::vector<VectorPtr> children,
+      BufferPtr tags,
+      std::optional<vector_size_t> nullCount = std::nullopt);
 
   ~UnionVector() override = default;
 
@@ -67,15 +67,19 @@ class UnionVector : public BaseVector {
    * Returns the child vector for the given tag.
    */
   const VectorPtr& childAt(uint8_t tag) const {
-    VELOX_CHECK_LT(static_cast<size_t>(tag), children_.size(), 
-    "Trying to access non-existing child in UnionVector: {}",
+    VELOX_CHECK_LT(
+        static_cast<size_t>(tag),
+        children_.size(),
+        "Trying to access non-existing child in UnionVector: {}",
         toString());
     return children_[tag];
   }
 
   VectorPtr& childAt(uint8_t tag) {
-    VELOX_CHECK_LT(static_cast<size_t>(tag), children_.size(), 
-    "Trying to access non-existing child in UnionVector: {}",
+    VELOX_CHECK_LT(
+        static_cast<size_t>(tag),
+        children_.size(),
+        "Trying to access non-existing child in UnionVector: {}",
         toString());
     return children_[tag];
   }
@@ -108,13 +112,26 @@ class UnionVector : public BaseVector {
     return childrenSize_;
   }
 
-  // BaseVector interface implementations.
+  void setChildAt(uint8_t tag, VectorPtr child) {
+    children_[tag] = BaseVector::getOrCreateEmpty(
+        std::move(child), type()->childAt(tag), pool_);
+  }
 
-  bool isNullAt(vector_size_t index) const override;
+  BufferPtr mutableOffsets(vector_size_t size) {
+    BaseVector::resizeIndices(length_, size, pool_, offsets_, &rawOffsets_);
+    return offsets_;
+  }
 
-  bool containsNullAt(vector_size_t index) const override;
+  BufferPtr mutableTags(vector_size_t size) {
+    resizeTags(length_, size, pool_);
+    return tags_;
+  }
 
   void ensureChild(uint8_t tag);
+
+  // BaseVector interface implementations.
+
+  bool containsNullAt(vector_size_t index) const override;
 
   std::optional<int32_t> compare(
       const BaseVector* other,
@@ -133,9 +150,9 @@ class UnionVector : public BaseVector {
       vector_size_t count) override;
 
   void copy(
-    const BaseVector* source,
-    const SelectivityVector& rows,
-    const vector_size_t* toSourceRow) override;
+      const BaseVector* source,
+      const SelectivityVector& rows,
+      const vector_size_t* toSourceRow) override;
 
   void copyRanges(
       const BaseVector* source,
@@ -180,17 +197,17 @@ class UnionVector : public BaseVector {
 
  private:
   void resizeTags(
-    vector_size_t currentSize,
-    vector_size_t newSize,
-    velox::memory::MemoryPool* pool);
+      vector_size_t currentSize,
+      vector_size_t newSize,
+      velox::memory::MemoryPool* pool);
 
   static BufferPtr computeOffsets(
-    vector_size_t length,
-    const BufferPtr& tags,
-    const BufferPtr& nulls,
-    size_t numChildren,
-    velox::memory::MemoryPool* pool,
-    std::vector<vector_size_t>& childCounts);
+      vector_size_t length,
+      const BufferPtr& tags,
+      const BufferPtr& nulls,
+      size_t numChildren,
+      velox::memory::MemoryPool* pool,
+      std::vector<vector_size_t>& childCounts);
 
   vector_size_t ensureAndAllocateChild(uint8_t tag, vector_size_t size);
 
@@ -201,7 +218,6 @@ class UnionVector : public BaseVector {
   // child vectors, one per type in the UnionType.
   mutable std::vector<VectorPtr> children_;
   const size_t childrenSize_;
-
 
   // tags buffer (uint8_t).
   BufferPtr tags_;

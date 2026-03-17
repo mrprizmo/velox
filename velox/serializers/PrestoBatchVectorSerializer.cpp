@@ -193,6 +193,50 @@ void PrestoBatchVectorSerializer::estimateSerializedSizeImpl(
           arrayVector->elements(), childRanges, childSizes.data(), scratch);
       break;
     }
+    case VectorEncoding::Simple::UNION: {
+      auto* unionVector = vector->as<UnionVector>();
+      const auto* rawTags = unionVector->rawTags();
+      const auto* rawOffsets = unionVector->rawOffsets();
+      const int32_t numChildren = unionVector->childrenSize();
+
+      std::vector<std::vector<IndexRange>> childRanges(numChildren);
+      std::vector<std::vector<vector_size_t*>> childSizes(numChildren);
+
+      for (int32_t rangeIdx = 0; rangeIdx < ranges.size(); ++rangeIdx) {
+        const int32_t begin = ranges[rangeIdx].begin;
+        const int32_t end = begin + ranges[rangeIdx].size;
+        bool hasNull = false;
+
+        for (int32_t offset = begin; offset < end; ++offset) {
+          if (vector->isNullAt(offset)) {
+            hasNull = true;
+          } else {
+            *sizes[rangeIdx] += sizeof(uint8_t);
+
+            const uint8_t tag = rawTags[offset];
+            childRanges[tag].push_back(IndexRange{rawOffsets[offset], 1});
+            childSizes[tag].push_back(sizes[rangeIdx]);
+          }
+        }
+
+        if (hasNull) {
+          *sizes[rangeIdx] +=
+              static_cast<int32_t>(bits::nbytes(ranges[rangeIdx].size));
+        }
+      }
+
+      for (int32_t i = 0; i < numChildren; ++i) {
+        if (childRanges[i].empty()) {
+          continue;
+        }
+        estimateSerializedSizeImpl(
+            unionVector->childAt(i),
+            childRanges[i],
+            childSizes[i].data(),
+            scratch);
+      }
+      break;
+    }
     case VectorEncoding::Simple::LAZY:
       estimateSerializedSizeImpl(
           vector->as<LazyVector>()->loadedVectorShared(),

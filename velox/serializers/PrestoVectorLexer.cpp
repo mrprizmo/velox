@@ -113,6 +113,8 @@ Status PrestoVectorLexer::lexColumn() {
     VELOX_RETURN_NOT_OK(lexDictionary());
   } else if (encoding == kRLE) {
     VELOX_RETURN_NOT_OK(lexRLE());
+  } else if (encoding == kUnion) {
+    VELOX_RETURN_NOT_OK(lexUnion());
   } else {
     return Status::Invalid("Unknown encoding: {}", encoding);
   }
@@ -172,6 +174,40 @@ Status PrestoVectorLexer::lexRow() {
   VELOX_RETURN_NOT_OK(lexBytes(offsetBytes, TokenType::OFFSETS));
   VELOX_RETURN_NOT_OK(lexNulls(numRows));
 
+  return Status::OK();
+}
+
+Status PrestoVectorLexer::lexUnion() {
+  int32_t numChildren;
+  VELOX_RETURN_NOT_OK(lexInt(TokenType::NUM_FIELDS, &numChildren));
+  VELOX_RETURN_IF(
+      numChildren < 0,
+      Status::Invalid("Negative numChildren in union: {}", numChildren));
+
+  int32_t size;
+  VELOX_RETURN_NOT_OK(lexInt(TokenType::NUM_ROWS, &size));
+
+  int32_t nonNullCount;
+  VELOX_RETURN_NOT_OK(lexInt(TokenType::NUM_ROWS, &nonNullCount));
+  VELOX_RETURN_IF(
+      nonNullCount < 0 || nonNullCount > size,
+      Status::Invalid(
+          "Invalid nonNullCount {} for union with {} rows",
+          nonNullCount,
+          size));
+
+  VELOX_RETURN_NOT_OK(lexBytes(
+      nonNullCount * static_cast<int32_t>(sizeof(uint8_t)),
+      TokenType::BYTE_ARRAY));
+
+  int32_t numUsedChildren = 0;
+  VELOX_RETURN_NOT_OK(lexBitSet(numChildren, numUsedChildren));
+
+  for (int32_t i = 0; i < numUsedChildren; ++i) {
+    VELOX_RETURN_NOT_OK(lexColumn());
+  }
+
+  VELOX_RETURN_NOT_OK(lexNulls(size));
   return Status::OK();
 }
 
@@ -244,6 +280,31 @@ PrestoVectorLexer::lexBytes(int32_t numBytes, TokenType tokenType, char* dst) {
   }
   source_.remove_prefix(numBytes);
   commit(tokenType);
+  return Status::OK();
+}
+
+Status PrestoVectorLexer::lexBitSet(int32_t numBits, int32_t& numSet) {
+  assertCommitted();
+  VELOX_RETURN_IF(
+      numBits < 0, Status::Invalid("Negative numBits: {}", numBits));
+
+  const auto numBytes = static_cast<int32_t>(bits::nbytes(numBits));
+  const auto numWords = static_cast<int32_t>(bits::nwords(numBits));
+
+  // reuse nullsBuffer_ as temporary storage
+  if (static_cast<int32_t>(nullsBuffer_.size()) < numWords) {
+    nullsBuffer_.resize(numWords);
+  }
+
+  // zero out the buffer before reading
+  memset(nullsBuffer_.data(), 0, numWords * sizeof(uint64_t));
+
+  VELOX_RETURN_NOT_OK(lexBytes(
+      numBytes,
+      TokenType::BITSET,
+      reinterpret_cast<char*>(nullsBuffer_.data())));
+
+  numSet = bits::countBits(nullsBuffer_.data(), 0, numBits);
   return Status::OK();
 }
 

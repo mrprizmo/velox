@@ -121,7 +121,7 @@ TEST_F(VectorToStringTest, unions) {
       unionWithNulls->toString(),
       "[UNION UNION<INTEGER,VARCHAR>: 4 elements, 1 nulls]");
   ASSERT_EQ(unionWithNulls->toString(1), "null");
-  ASSERT_EQ(unionWithNulls->toString(3), "null");
+  ASSERT_EQ(unionWithNulls->toString(3), "{tag: 1, value: null}");
 
   auto constantUnion = BaseVector::wrapInConstant(10, 0, unionVector);
   ASSERT_EQ(

@@ -36,6 +36,8 @@ std::pair<const uint64_t*, int32_t> getStructNulls(int64_t position) {
   return {it->second.first.data(), it->second.second};
 }
 
+bool hasNestedStructs(const std::vector<TypePtr>& types);
+
 bool hasNestedStructs(const TypePtr& type) {
   if (isIPPrefixType(type)) {
     return false;
@@ -50,12 +52,15 @@ bool hasNestedStructs(const TypePtr& type) {
     return hasNestedStructs(type->childAt(0)) ||
         hasNestedStructs(type->childAt(1));
   }
+  if (type->isUnion()) {
+    return hasNestedStructs(type->asUnion().children());
+  }
   return false;
 }
 
 bool hasNestedStructs(const std::vector<TypePtr>& types) {
   for (auto& child : types) {
-    if (hasNestedStructs(child)) {
+    if (child && hasNestedStructs(child)) {
       return true;
     }
   }
@@ -178,6 +183,34 @@ void readRowVectorStructNulls(
   }
 }
 
+void readUnionVectorStructNulls(
+    ByteInputStream* source,
+    const TypePtr& type,
+    bool useLosslessTimestamp,
+    Scratch& scratch) {
+  const int32_t numChildren = source->read<int32_t>();
+  VELOX_DCHECK_EQ(numChildren, static_cast<int32_t>(type->size()));
+
+  const int32_t size = source->read<int32_t>();
+
+  const int32_t nonNullCount = source->read<int32_t>();
+  source->skip(nonNullCount * sizeof(uint8_t));
+
+  const int32_t numUsedWords = bits::nwords(numChildren);
+  ScratchPtr<uint64_t, 1> usedHolder(scratch);
+  auto* usedBuf = usedHolder.get(numUsedWords);
+  memset(usedBuf, 0, numUsedWords * sizeof(uint64_t));
+  source->readBytes(usedBuf, bits::nbytes(numChildren));
+
+  std::vector<TypePtr> usedTypes;
+  bits::forEachSetBit(usedBuf, 0, numChildren, [&](int32_t i) {
+    usedTypes.push_back(type->childAt(i));
+  });
+  readStructNullsColumns(source, usedTypes, useLosslessTimestamp, scratch);
+
+  valueCount(source, size, scratch);
+}
+
 std::string readLengthPrefixedString(ByteInputStream* source) {
   int32_t size = source->read<int32_t>();
   std::string value;
@@ -247,6 +280,7 @@ void readStructNullsColumns(
           {TypeKind::TIMESTAMP, &readStructNulls<Timestamp>},
           {TypeKind::VARCHAR, &readStructNulls<StringView>},
           {TypeKind::VARBINARY, &readStructNulls<StringView>},
+          {TypeKind::UNION, &readUnionVectorStructNulls},
           {TypeKind::ARRAY, &readArrayVectorStructNulls},
           {TypeKind::MAP, &readMapVectorStructNulls},
           {TypeKind::ROW, &readRowVectorStructNulls},
@@ -1071,6 +1105,86 @@ void readRowVector(
   }
 }
 
+void readUnionVector(
+    ByteInputStream* source,
+    const TypePtr& type,
+    vector_size_t resultOffset,
+    const uint64_t* incomingNulls,
+    int32_t numIncomingNulls,
+    velox::memory::MemoryPool* pool,
+    const PrestoVectorSerde::PrestoOptions& opts,
+    VectorPtr& result) {
+  auto* unionVector = result->asUnchecked<UnionVector>();
+  const int32_t numChildren = source->read<int32_t>();
+
+  VELOX_DCHECK_EQ(numChildren, static_cast<int32_t>(type->size()));
+
+  const int32_t size = source->read<int32_t>();
+  const int32_t numNewValues = sizeWithIncomingNulls(size, numIncomingNulls);
+  const int32_t nonNullCount = source->read<int32_t>();
+
+  std::vector<uint8_t> serialTags(std::max(nonNullCount, 1));
+  source->readBytes(serialTags.data(), nonNullCount);
+
+  const int32_t numUsedWords = static_cast<int32_t>(bits::nwords(numChildren));
+  std::vector<uint64_t> usedBuf(numUsedWords, 0);
+  source->readBytes(usedBuf.data(), bits::nbytes(numChildren));
+
+  std::vector<vector_size_t> childBaseOffsets(numChildren, 0);
+  for (int32_t i = 0; i < numChildren; ++i) {
+    auto& child = unionVector->childAt(i);
+    childBaseOffsets[i] = child ? child->size() : 0;
+  }
+
+  bits::forEachSetBit(usedBuf.data(), 0, numChildren, [&](int32_t i) {
+    std::vector<TypePtr> singleType{type->childAt(i)};
+    unionVector->ensureChild(i);
+    auto childVec = unionVector->childAt(i);
+    std::vector<VectorPtr> singleVec{std::move(childVec)};
+
+    readColumns(
+        source,
+        singleType,
+        childBaseOffsets[i],
+        nullptr,
+        0,
+        pool,
+        opts,
+        singleVec);
+
+    unionVector->setChildAt(i, std::move(singleVec[0]));
+  });
+  unionVector->resize(resultOffset + numNewValues);
+
+  BufferPtr offsets = unionVector->mutableOffsets(resultOffset + numNewValues);
+  auto rawOffsets = offsets->asMutable<vector_size_t>();
+  BufferPtr tags = unionVector->mutableTags(resultOffset + numNewValues);
+  auto rawTags = tags->asMutable<uint8_t>();
+
+  readNulls(
+      source,
+      size,
+      resultOffset,
+      incomingNulls,
+      numIncomingNulls,
+      *unionVector);
+  int32_t tagIdx = 0;
+
+  for (int32_t i = 0; i < numNewValues; ++i) {
+    if (unionVector->isNullAt(resultOffset + i)) {
+      rawOffsets[resultOffset + i] = 0;
+      rawTags[resultOffset + i] = 0;
+      continue;
+    }
+    const uint8_t tag = serialTags[tagIdx++];
+
+    rawTags[resultOffset + i] = tag;
+    rawOffsets[resultOffset + i] = childBaseOffsets[tag]++;
+  }
+
+  VELOX_DCHECK_EQ(tagIdx, nonNullCount);
+}
+
 void readConstantVector(
     ByteInputStream* source,
     const TypePtr& type,
@@ -1261,10 +1375,12 @@ void readColumns(
           {TypeKind::VARCHAR, &read<StringView>},
           {TypeKind::VARBINARY, &read<StringView>},
           {TypeKind::OPAQUE, &read<OpaqueType>},
+          {TypeKind::UNION, &readUnionVector},
           {TypeKind::ARRAY, &readArrayVector},
           {TypeKind::MAP, &readMapVector},
           {TypeKind::ROW, &readRowVector},
-          {TypeKind::UNKNOWN, &read<UnknownValue>}};
+          {TypeKind::UNKNOWN, &read<UnknownValue>},
+      };
 
   VELOX_CHECK_EQ(types.size(), results.size());
 
