@@ -832,6 +832,10 @@ void CastExpr::applyPeeled(
     } else {
       applyCustomCast();
     }
+  } else if (fromType->kind() == TypeKind::UNION) {
+    result = castFromUnion(rows, input, context, fromType, toType);
+  } else if (toType->kind() == TypeKind::UNION) {
+    result = castToUnion(rows, input, context, fromType, toType);
   } else if (fromType->isDate()) {
     result = castFromDate(rows, input, context, toType);
   } else if (toType->isDate()) {
@@ -1097,6 +1101,83 @@ void CastExpr::evalSpecialForm(
   // Return 'input' back to the vector pool in 'context' so it can be
   // reused.
   context.releaseVector(input);
+}
+
+VectorPtr CastExpr::castToUnion(
+    const SelectivityVector& rows,
+    const BaseVector& input,
+    exec::EvalCtx& context,
+    const TypePtr& fromType,
+    const TypePtr& toType) {
+  const auto& unionType = toType->asUnion();
+  const auto numChildren = unionType.size();
+
+  const uint8_t targetTag = unionType.typeIndex(fromType);
+  const auto& childType = unionType.childAt(targetTag);
+
+  const vector_size_t size = rows.end();
+
+  VectorPtr child;
+  context.ensureWritable(rows, childType, child);
+  child->copy(&input, rows, /*toSourceRow=*/nullptr);
+
+  std::vector<VectorPtr> children(numChildren, nullptr);
+  children[targetTag] = std::move(child);
+
+  // Allocate tags and offsets buffers.
+  BufferPtr tagsBuf = allocateTags(size, context.pool());
+  auto* rawTags = tagsBuf->asMutable<uint8_t>();
+  std::fill(rawTags, rawTags + size, targetTag);
+
+  BufferPtr offsetsBuf = allocateOffsets(size, context.pool());
+  auto* rawOffsets = offsetsBuf->asMutable<vector_size_t>();
+  std::iota(rawOffsets, rawOffsets + size, vector_size_t{0});
+
+  // Nulls are handled by CastExpr::apply() via addNulls() after return.
+  return std::make_shared<UnionVector>(
+      context.pool(),
+      toType,
+      /*nulls=*/ nullptr,
+      size,
+      std::move(children),
+      std::move(tagsBuf),
+      std::move(offsetsBuf));
+}
+
+VectorPtr CastExpr::castFromUnion(
+    const SelectivityVector& rows,
+    const BaseVector& input,
+    exec::EvalCtx& context,
+    const TypePtr& fromType,
+    const TypePtr& toType) {
+  const auto* unionVec = input.as<UnionVector>();
+  VELOX_CHECK_NOT_NULL(unionVec, "castFromUnion: input is not a UnionVector");
+
+  const auto& unionType = fromType->asUnion();
+  const auto* rawTags = unionVec->rawTags();
+  const auto* rawOffsets = unionVec->rawOffsets();
+
+  const uint8_t targetTag = unionType.typeIndex(toType);
+  const auto& childVector = unionVec->childAt(targetTag);
+
+  VectorPtr result;
+  context.ensureWritable(rows, toType, result);
+
+  result->addNulls(rows);
+
+  SelectivityVector matchingRows(rows.end(), false);
+  rows.applyToSelected([&](vector_size_t row) {
+    if (!unionVec->isNullAt(row) && rawTags[row] == targetTag) {
+      matchingRows.setValid(row, true);
+    }
+  });
+  matchingRows.updateBounds();
+
+  if (matchingRows.hasSelections()) {
+    result->copy(childVector.get(), matchingRows, rawOffsets);
+  }
+
+  return result;
 }
 
 std::string CastExpr::toString(bool recursive) const {

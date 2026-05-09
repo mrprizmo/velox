@@ -143,6 +143,24 @@ class CastExpr : public SpecialForm {
       const RowType& fromType,
       const TypePtr& toType);
 
+  /// Cast vector into a UnionVector.
+  /// The input type must be one of the union's child types.
+  VectorPtr castToUnion(
+      const SelectivityVector& rows,
+      const BaseVector& input,
+      exec::EvalCtx& context,
+      const TypePtr& fromType,
+      const TypePtr& toType);
+
+  /// Cast a UnionVector to one of its child types.
+  /// Rows where the active tag doesn't match the target type become null.
+  VectorPtr castFromUnion(
+      const SelectivityVector& rows,
+      const BaseVector& input,
+      exec::EvalCtx& context,
+      const TypePtr& fromType,
+      const TypePtr& toType);
+
   /// Apply the cast between decimal vectors.
   /// @param rows Non-null rows of the input vector.
   /// @param input The input decimal vector. It is guaranteed to be flat or
