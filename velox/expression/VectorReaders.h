@@ -851,17 +851,7 @@ struct VectorReader<DynamicUnion> {
   }
 
   bool isSet(size_t offset) const {
-    if (decoded_.isNullAt(offset)) {
-      return false;
-    }
-    auto baseIndex = decoded_.index(offset);
-    auto tag = rawTags_[baseIndex];
-    auto childOffset = rawOffsets_[baseIndex];
-    VELOX_CHECK(
-        childReaders_[tag] != nullptr,
-        "Null child reader found for tag {}",
-        tag);
-    return childReaders_[tag]->isSet(childOffset);
+    return !decoded_.isNullAt(offset);
   }
 
   bool mayHaveNulls() const {

@@ -782,8 +782,7 @@ class DynamicUnionWriter {
 
   void initialize(BaseVector* vector) {
     unionVector_ = vector->as<UnionVector>();
-    auto childrenVectors = unionVector_->children();
-    childrenCount_ = childrenVectors.size();
+    childrenCount_ = unionVector_->children().size();
 
     tags_ = unionVector_->tags()->asMutable<uint8_t>();
     offsets_ = unionVector_->offsets()->asMutable<vector_size_t>();
@@ -791,16 +790,15 @@ class DynamicUnionWriter {
     childrenWriters_.reserve(childrenCount_);
     for (int i = 0; i < childrenCount_; ++i) {
       childrenWriters_.push_back(std::make_shared<VectorWriter<Any, void>>());
-      childrenWriters_[i]->init(*childrenVectors[i]);
-      childrenWriters_[i]->ensureSize(1);
     }
   }
 
   child_writer_t& set_tag(uint8_t tag) {
     VELOX_USER_CHECK_LT(tag, childrenCount_, "Union tag out of range.");
-
     unionVector_->ensureChild(tag);
-    vector_size_t childOffset = unionVector_->childAt(tag)->size();
+    auto& childVector = *unionVector_->childAt(tag);
+    childrenWriters_[tag]->init(childVector);
+    vector_size_t childOffset = childVector.size();
     childrenWriters_[tag]->ensureSize(childOffset + 1);
     offsets_[offset_] = childOffset;
     tags_[offset_] = tag;
@@ -817,10 +815,6 @@ class DynamicUnionWriter {
 
   uint8_t find_tag(const TypePtr& type) const {
     return unionVector_->type()->asUnion().typeIndex(type);
-  }
-
-  void reserve(uint8_t tag, vector_size_t k) {
-    VELOX_NYI();
   }
 
   void finalizeNull() {
